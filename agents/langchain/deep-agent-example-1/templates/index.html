@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Live Fact Checker</title>
+<style>
+/* ── Reset & tokens ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0f1117;
+  --surface:   #181c24;
+  --surface2:  #1e2330;
+  --border:    #2a2f3d;
+  --border2:   #353c50;
+  --text:      #dde3ef;
+  --text2:     #a8b0c4;
+  --muted:     #636b82;
+  --accent:    #4d8ef0;
+  --green:     #3fb068;
+  --green-bg:  #162a1f;
+  --red:       #e8524a;
+  --red-bg:    #2a1619;
+  --yellow:    #d4a72c;
+  --yellow-bg: #2a2210;
+  --purple:    #9e7fe8;
+  --purple-bg: #1f1a35;
+  --orange:    #e07830;
+  --radius:    8px;
+  --panel-h:   148px; /* fixed bottom panel height */
+  --header-h:  48px;
+}
+
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────────── */
+#header {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  height: var(--header-h);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 20px;
+}
+#header h1 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+#header-sub {
+  font-size: 11px; color: var(--muted);
+  margin-left: auto; white-space: nowrap;
+}
+#claims-counter {
+  font-size: 11px; font-weight: 600;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 2px 9px; color: var(--text2);
+}
+
+/* ── Scrollable claims area ────────────────────────────────────────────────── */
+#claims-area {
+  position: fixed;
+  top: var(--header-h);
+  left: 0; right: 0;
+  bottom: var(--panel-h);
+  overflow-y: auto;
+  padding: 16px 20px 12px;
+}
+
+/* ── Empty state ───────────────────────────────────────────────────────────── */
+#empty-state {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  height: 100%;
+  color: var(--muted); font-size: 13px; text-align: center; line-height: 2;
+}
+#empty-state em { color: var(--text2); font-style: normal; }
+
+/* ── Error banner ──────────────────────────────────────────────────────────── */
+#error-banner {
+  display: none;
+  background: var(--red-bg); border: 1px solid var(--red);
+  border-radius: var(--radius); padding: 8px 12px;
+  font-size: 12px; color: var(--red);
+  margin-bottom: 10px;
+}
+
+/* ── Sentence card ─────────────────────────────────────────────────────────── */
+.s-card {
+  display: grid;
+  grid-template-columns: 2fr 3fr;
+  gap: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+  overflow: hidden;
+  transition: border-color .2s;
+}
+.s-card:last-child { margin-bottom: 0; }
+
+/* left column */
+.s-left {
+  padding: 14px 16px;
+  border-right: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.6;
+}
+.s-left-label {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin-bottom: 5px;
+}
+.s-sentence { color: var(--text); font-style: italic; }
+
+/* right column: stacked claim blocks */
+.s-right { display: flex; flex-direction: column; }
+
+/* ── Claim block (inside the right column) ──────────────────────────────────── */
+.c-block {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.c-block:last-child { border-bottom: none; }
+
+/* verdict accent strip */
+.c-block.SUPPORTED            { border-left: 3px solid var(--green);  }
+.c-block.CONTRADICTED         { border-left: 3px solid var(--red);    }
+.c-block.MISLEADING           { border-left: 3px solid var(--yellow); }
+.c-block.INSUFFICIENT_EVIDENCE { border-left: 3px solid var(--muted); }
+.c-block.superseded           { border-left: 3px solid var(--purple); opacity: .5; }
+.c-block.error                { border-left: 3px solid var(--orange); }
+.c-block.queued,
+.c-block.researching,
+.c-block.analyzing            { border-left: 3px solid var(--border2); }
+
+.c-block-header {
+  display: flex; align-items: flex-start;
+  gap: 8px; margin-bottom: 4px;
+}
+.c-claim-label {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); flex-shrink: 0; padding-top: 3px;
+}
+.c-claim-text {
+  flex: 1; font-size: 13px; color: var(--text); line-height: 1.5;
+}
+
+/* ── Verdict badge ─────────────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex; align-items: center;
+  height: 20px; padding: 0 7px;
+  border-radius: 4px; font-size: 10px; font-weight: 700;
+  letter-spacing: .04em; white-space: nowrap; flex-shrink: 0;
+}
+.badge.SUPPORTED            { background: var(--green-bg);  color: var(--green);  }
+.badge.CONTRADICTED         { background: var(--red-bg);    color: var(--red);    }
+.badge.MISLEADING           { background: var(--yellow-bg); color: var(--yellow); }
+.badge.INSUFFICIENT_EVIDENCE { background: var(--surface2); color: var(--muted);  }
+.badge.queued               { background: var(--surface2); color: var(--muted);  }
+.badge.researching          { background: #0e1f3a; color: var(--accent);  }
+.badge.analyzing            { background: var(--purple-bg); color: var(--purple); }
+.badge.superseded           { background: var(--purple-bg); color: var(--purple); }
+.badge.error                { background: #2a1500; color: var(--orange);  }
+
+.spinner {
+  display: inline-block; width: 9px; height: 9px;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  border-radius: 50%; animation: spin .65s linear infinite;
+  margin-right: 4px; vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Confidence bar ────────────────────────────────────────────────────────── */
+.conf-bar {
+  height: 2px; background: var(--border);
+  border-radius: 2px; margin: 7px 0 6px; overflow: hidden;
+}
+.conf-fill { height: 100%; border-radius: 2px; transition: width .5s; }
+.SUPPORTED    .conf-fill { background: var(--green);  }
+.CONTRADICTED .conf-fill { background: var(--red);    }
+.MISLEADING   .conf-fill { background: var(--yellow); }
+
+/* ── Explanation & one-liner ───────────────────────────────────────────────── */
+.c-one-liner {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  margin-bottom: 4px; line-height: 1.4;
+}
+.c-explanation {
+  font-size: 12px; color: var(--text2); line-height: 1.6;
+  margin-bottom: 6px;
+}
+
+/* ── Sources ───────────────────────────────────────────────────────────────── */
+.c-sources { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+.c-source {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--accent);
+  text-decoration: none; overflow: hidden;
+}
+.c-source:hover { text-decoration: underline; }
+.c-source-icon { flex-shrink: 0; font-size: 9px; }
+.c-source-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Progress line ─────────────────────────────────────────────────────────── */
+.c-progress {
+  font-size: 11px; color: var(--muted); font-style: italic;
+  margin-top: 5px;
+}
+
+/* ── No-claims-in-sentence note ────────────────────────────────────────────── */
+.c-no-claim {
+  font-size: 12px; color: var(--muted); font-style: italic;
+  padding: 14px 16px;
+}
+
+/* ── Fixed bottom panel ────────────────────────────────────────────────────── */
+#panel {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+  height: var(--panel-h);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 10px 16px 10px;
+  gap: 8px;
+}
+#panel-toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
+}
+
+button {
+  border: none; border-radius: 6px;
+  padding: 6px 12px; font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: opacity .15s;
+}
+button:disabled { opacity: .4; cursor: default; }
+#btn-mic {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px;
+  background: var(--green); color: #000; font-size: 12px;
+}
+#btn-mic.recording { background: var(--red); color: #fff; }
+#btn-reset-sess {
+  background: var(--surface2); color: var(--text2);
+  border: 1px solid var(--border);
+}
+#lang-select {
+  background: var(--surface2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 9px; font-size: 12px;
+}
+#stt-status {
+  font-size: 11px; color: var(--muted);
+  margin-left: 2px;
+}
+.rec-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--red); flex-shrink: 0;
+  animation: pulse 1s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+#transcript-area {
+  flex: 1;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 12px;
+  font-size: 13px; color: var(--text); line-height: 1.6;
+  overflow-y: auto; resize: none;
+  white-space: pre-wrap; word-break: break-word;
+}
+#transcript-area .interim { color: var(--muted); font-style: italic; }
+#transcript-area .placeholder { color: var(--muted); font-style: italic; }
+
+/* ── Toast ─────────────────────────────────────────────────────────────────── */
+#toast {
+  position: fixed; bottom: calc(var(--panel-h) + 10px); right: 18px;
+  z-index: 20;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: var(--radius); padding: 8px 14px;
+  font-size: 12px; max-width: 320px;
+  opacity: 0; transition: opacity .25s; pointer-events: none;
+}
+#toast.show { opacity: 1; }
+
+/* ── Responsive ────────────────────────────────────────────────────────────── */
+@media (max-width: 680px) {
+  .s-card { grid-template-columns: 1fr; }
+  .s-left { border-right: none; border-bottom: 1px solid var(--border); }
+  :root { --panel-h: 168px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<div id="header">
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <circle cx="6.5" cy="6.5" r="5" stroke="#4d8ef0" stroke-width="1.5"/>
+    <line x1="10.3" y1="10.3" x2="14.5" y2="14.5" stroke="#4d8ef0" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+  <h1>Live Fact Checker</h1>
+  <span id="claims-counter">0 claims</span>
+  <span id="header-sub">Nemotron · MiniMax-M3 · Tavily</span>
+</div>
+
+<!-- ── Scrollable claims area ──────────────────────────────────────────────── -->
+<div id="claims-area">
+  <div id="error-banner"></div>
+  <div id="empty-state">
+    <div>Click the microphone and speak a factual claim.</div>
+    <div>Each sentence gets its own card.</div>
+    <div>Try: <em>"The Eiffel Tower is 330 metres tall."</em></div>
+  </div>
+  <!-- sentence cards inserted here by JS -->
+</div>
+
+<!-- ── Fixed bottom panel ──────────────────────────────────────────────────── -->
+<div id="panel">
+  <div id="panel-toolbar">
+    <button id="btn-mic">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 1a4 4 0 0 0-4 4v7a4 4 0 0 0 8 0V5a4 4 0 0 0-4-4z"/>
+        <path d="M19 10a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.92V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.08A7 7 0 0 0 19 10z"/>
+      </svg>
+      <span id="btn-mic-label">Start</span>
+    </button>
+    <button id="btn-reset-sess">Reset</button>
+    <select id="lang-select">
+      <option value="en">English</option>
+      <option value="de">Deutsch</option>
+      <option value="fr">Français</option>
+      <option value="es">Español</option>
+    </select>
+    <span id="stt-status">—</span>
+  </div>
+  <div id="transcript-area">
+    <span class="placeholder">Transcript will appear here…</span>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+/* ═══════════════════════════════════════════════════════════════════════════
+   State
+   ═══════════════════════════════════════════════════════════════════════════ */
+const S = {
+  cfg: { stt_mode: 'browser', groq_model: null },   // from /api/config
+  recording: false,
+  transcript: '',       // committed final text
+  interim: '',          // live hypothesis (Web Speech only)
+
+  // Ordered list of sentences received from the transcript stream.
+  // Each: { id, text, claimIds: [] }
+  sentences: [],
+  sentenceMap: {},      // sentenceId → sentence obj (sentenceId = slug of text)
+
+  // All known claims keyed by claim id
+  claims: {},           // claimId → claim obj
+
+  // claim id → claim id that owns this claim's sentence card
+  claimToSentence: {},  // claimId → sentenceId
+
+  sseStreams: {},        // claimId → EventSource
+  submitTimer: null,
+  groqRecorder: null,   // MediaRecorder when using Groq Whisper
+  groqSessionId: 0,     // incremented on each new recording + Reset; stale callbacks check this
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DOM refs
+   ═══════════════════════════════════════════════════════════════════════════ */
+const $claimsArea   = document.getElementById('claims-area');
+const $emptyState   = document.getElementById('empty-state');
+const $errorBanner  = document.getElementById('error-banner');
+const $txArea       = document.getElementById('transcript-area');
+const $btnMic       = document.getElementById('btn-mic');
+const $btnMicLabel  = document.getElementById('btn-mic-label');
+const $btnReset     = document.getElementById('btn-reset-sess');
+const $langSelect   = document.getElementById('lang-select');
+const $sttStatus    = document.getElementById('stt-status');
+const $counter      = document.getElementById('claims-counter');
+const $toast        = document.getElementById('toast');
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Utilities
+   ═══════════════════════════════════════════════════════════════════════════ */
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function slug(text) {
+  return text.trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,40);
+}
+
+let _toastTimer;
+function toast(msg) {
+  $toast.textContent = msg;
+  $toast.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => $toast.classList.remove('show'), 3000);
+}
+
+function showError(msg) {
+  $errorBanner.textContent = msg;
+  $errorBanner.style.display = 'block';
+  setTimeout(() => { $errorBanner.style.display = 'none'; }, 8000);
+}
+
+function updateCounter() {
+  const n = Object.keys(S.claims).length;
+  $counter.textContent = n + (n === 1 ? ' claim' : ' claims');
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Transcript display
+   ═══════════════════════════════════════════════════════════════════════════ */
+function renderTranscript() {
+  const committed = S.transcript;
+  const interim   = S.interim;
+  if (!committed && !interim) {
+    $txArea.innerHTML = '<span class="placeholder">Transcript will appear here…</span>';
+    return;
+  }
+  $txArea.innerHTML =
+    esc(committed) +
+    (interim ? '<span class="interim"> ' + esc(interim) + '</span>' : '');
+  $txArea.scrollTop = $txArea.scrollHeight;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Sentence → Card management
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Return or create the DOM sentence card for this sentence id. */
+function getOrCreateSentenceCard(sid, sentenceText) {
+  let el = document.getElementById('sc-' + sid);
+  if (!el) {
+    $emptyState.style.display = 'none';
+    el = document.createElement('div');
+    el.className = 's-card';
+    el.id = 'sc-' + sid;
+    el.innerHTML =
+      '<div class="s-left">' +
+        '<div class="s-left-label">Said</div>' +
+        '<div class="s-sentence">' + esc(sentenceText) + '</div>' +
+      '</div>' +
+      '<div class="s-right" id="sr-' + sid + '">' +
+      '</div>';
+    $claimsArea.appendChild(el);
+    // Scroll new card into view
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  return el;
+}
+
+/** Ensure a claim block exists inside the sentence card; return the element. */
+function getOrCreateClaimBlock(claimId, sentenceId) {
+  let el = document.getElementById('cb-' + claimId);
+  if (!el) {
+    const right = document.getElementById('sr-' + sentenceId);
+    if (!right) return null;
+    el = document.createElement('div');
+    el.className = 'c-block queued';
+    el.id = 'cb-' + claimId;
+    right.appendChild(el);
+  }
+  return el;
+}
+
+/** Render / update a single claim block in-place. */
+function renderClaimBlock(claimId) {
+  const c = S.claims[claimId];
+  if (!c) return;
+  const sid = S.claimToSentence[claimId];
+  if (!sid) return;
+
+  // Ensure the sentence card exists
+  const sent = S.sentenceMap[sid];
+  if (sent) getOrCreateSentenceCard(sid, sent.text);
+
+  const el = getOrCreateClaimBlock(claimId, sid);
+  if (!el) return;
+
+  // Determine display class
+  const vclass = (c.status === 'done' || c.status === 'error' || c.status === 'superseded')
+    ? (c.verdict || c.status)
+    : c.status;
+  el.className = 'c-block ' + vclass;
+
+  // Badge
+  const badgeClass_ = (() => {
+    if (['researching','analyzing','queued','superseded','error'].includes(c.status)) return c.status;
+    return c.verdict || c.status;
+  })();
+  const badgeLabel_ = (() => {
+    if (c.status === 'researching') return '<span class="spinner"></span>Researching';
+    if (c.status === 'analyzing')   return '<span class="spinner"></span>Analyzing';
+    if (c.status === 'queued')      return 'Queued';
+    if (c.status === 'superseded')  return 'Superseded';
+    if (c.status === 'error')       return 'Error';
+    return c.verdict ? verdictLabel(c.verdict) : c.status;
+  })();
+
+  // Confidence bar
+  const pct = (c.confidence != null) ? Math.round(c.confidence * 100) : 0;
+  const confBar = (c.verdict && pct > 0)
+    ? '<div class="conf-bar"><div class="conf-fill" style="width:' + pct + '%"></div></div>'
+    : '';
+
+  // Sources
+  let sourcesHtml = '';
+  if (c.sources && c.sources.length) {
+    sourcesHtml = '<div class="c-sources">' +
+      c.sources.map(s =>
+        '<a class="c-source" href="' + esc(s.url || '#') + '" target="_blank" rel="noopener">' +
+          '<span class="c-source-icon">' + (s.supports_claim ? '↑' : '↓') + '</span>' +
+          '<span class="c-source-title">' + esc(s.title || s.url || '') + '</span>' +
+        '</a>'
+      ).join('') +
+    '</div>';
+  }
+
+  // Progress line
+  const progressHtml = (() => {
+    if (c.status === 'researching') return '<div class="c-progress">Searching with Tavily…</div>';
+    if (c.status === 'analyzing')   return '<div class="c-progress">Parsing verdict with Nemotron…</div>';
+    return '';
+  })();
+
+  const oneLiner   = c.one_liner   ? '<div class="c-one-liner">'  + esc(c.one_liner)   + '</div>' : '';
+  const explanation= c.explanation ? '<div class="c-explanation">' + esc(c.explanation) + '</div>' : '';
+
+  el.innerHTML =
+    '<div class="c-block-header">' +
+      '<span class="c-claim-label">Claim</span>' +
+      '<span class="c-claim-text">' + esc(c.text) + '</span>' +
+      '<span class="badge ' + badgeClass_ + '">' + badgeLabel_ + '</span>' +
+    '</div>' +
+    confBar +
+    oneLiner +
+    explanation +
+    sourcesHtml +
+    progressHtml;
+}
+
+function verdictLabel(v) {
+  return {
+    SUPPORTED:            'Supported',
+    CONTRADICTED:         'Contradicted',
+    MISLEADING:           'Misleading',
+    INSUFFICIENT_EVIDENCE:'Insufficient evidence',
+  }[v] || v;
+}
+
+/** Add a sentence card with a "no verifiable claim" note. */
+function renderNoClaimCard(sid, sentenceText) {
+  getOrCreateSentenceCard(sid, sentenceText);
+  const right = document.getElementById('sr-' + sid);
+  if (right && right.children.length === 0) {
+    right.innerHTML = '<div class="c-no-claim">No verifiable factual claim detected.</div>';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Submit transcript to backend
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Submit a sentence to /api/transcript.
+ * sentenceId is a local slug for this sentence (used as card key).
+ * sentenceText is what the user actually said.
+ */
+function submitSentence(sentenceId, sentenceText) {
+  // Register sentence in state so the card can be created immediately
+  if (!S.sentenceMap[sentenceId]) {
+    const sent = { id: sentenceId, text: sentenceText, claimIds: [] };
+    S.sentenceMap[sentenceId] = sent;
+    S.sentences.push(sent);
+  }
+
+  fetch('/api/transcript', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: sentenceText }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { showError(data.error); return; }
+
+    const extracted = data.extracted || [];
+    const queued    = data.queued || [];
+
+    if (extracted.length === 0) {
+      // No claims found — show the no-claim note
+      renderNoClaimCard(sentenceId, sentenceText);
+      return;
+    }
+
+    extracted.forEach(c => {
+      const cid = c.id || c.text;
+
+      // Map claim → sentence
+      if (!S.claimToSentence[cid]) {
+        S.claimToSentence[cid] = sentenceId;
+      }
+
+      // Register claim in state if not already there
+      if (!S.claims[cid]) {
+        S.claims[cid] = {
+          id: cid,
+          text: c.text,
+          status: 'queued',
+          verdict: null, one_liner: null,
+          explanation: null, confidence: null,
+          sources: [], research: null, corrects: c.corrects || null,
+        };
+        S.sentenceMap[sentenceId].claimIds.push(cid);
+      }
+
+      // Ensure the sentence card and claim block exist
+      getOrCreateSentenceCard(sentenceId, sentenceText);
+      getOrCreateClaimBlock(cid, sentenceId);
+      renderClaimBlock(cid);
+    });
+
+    updateCounter();
+
+    // Subscribe SSE for newly queued claims
+    queued.forEach(cid => {
+      if (!S.claimToSentence[cid]) {
+        S.claimToSentence[cid] = sentenceId;
+      }
+      subscribeSSE(cid);
+    });
+
+    if (queued.length) toast(queued.length + ' claim' + (queued.length>1?'s':'') + ' queued');
+  })
+  .catch(e => showError('Backend unreachable: ' + e.message));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SSE subscription
+   ═══════════════════════════════════════════════════════════════════════════ */
+function subscribeSSE(claimId) {
+  if (S.sseStreams[claimId]) return;
+  const es = new EventSource('/api/check/' + claimId);
+  S.sseStreams[claimId] = es;
+
+  es.addEventListener('update', e => {
+    const d = JSON.parse(e.data);
+    const cid = d.claim_id;
+
+    // Merge delta into state
+    S.claims[cid] = Object.assign(S.claims[cid] || { id: cid, text: '' }, d);
+
+    renderClaimBlock(cid);
+    updateCounter();
+  });
+
+  es.addEventListener('done', e => {
+    es.close();
+    delete S.sseStreams[claimId];
+    const c = S.claims[claimId];
+    if (c && c.verdict) {
+      const icon = {SUPPORTED:'✓',CONTRADICTED:'✗',MISLEADING:'~'}[c.verdict]||'?';
+      toast(icon + ' ' + verdictLabel(c.verdict) + ': "' + c.text.slice(0,45) + '…"');
+    }
+    renderClaimBlock(claimId);
+    updateCounter();
+  });
+
+  es.onerror = () => {
+    es.close();
+    delete S.sseStreams[claimId];
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Load existing claims on page load
+   ═══════════════════════════════════════════════════════════════════════════ */
+async function loadExistingClaims() {
+  try {
+    const r = await fetch('/api/claims');
+    const claimList = await r.json();
+    claimList.forEach(c => {
+      S.claims[c.id] = c;
+      // Existing claims have no sentence association; create a synthetic sentence
+      const syntheticSid = 'existing-' + c.id;
+      if (!S.sentenceMap[syntheticSid]) {
+        const sent = { id: syntheticSid, text: c.text, claimIds: [c.id] };
+        S.sentenceMap[syntheticSid] = sent;
+        S.sentences.push(sent);
+      }
+      S.claimToSentence[c.id] = syntheticSid;
+      getOrCreateSentenceCard(syntheticSid, c.text);
+      getOrCreateClaimBlock(c.id, syntheticSid);
+      renderClaimBlock(c.id);
+      if (['queued','researching','analyzing'].includes(c.status)) {
+        subscribeSSE(c.id);
+      }
+    });
+    if (claimList.length) $emptyState.style.display = 'none';
+    updateCounter();
+  } catch {}
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STT — browser Web Speech API path
+   ═══════════════════════════════════════════════════════════════════════════ */
+let recognition = null;
+
+// Track which sentences have already been submitted to avoid duplicates
+const submittedSentences = new Set();
+
+function initWebSpeech() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return false;
+  recognition = new SR();
+  recognition.continuous   = true;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    S.recording = true;
+    $btnMic.classList.add('recording');
+    $btnMicLabel.textContent = 'Stop';
+    setStatusText('Listening…');
+  };
+
+  recognition.onend = () => {
+    S.recording = false;
+    $btnMic.classList.remove('recording');
+    $btnMicLabel.textContent = 'Start';
+    setStatusText('Stopped');
+    S.interim = '';
+    renderTranscript();
+    // Submit any remaining transcript
+    maybeSplitAndSubmit(S.transcript, true);
+  };
+
+  recognition.onerror = e => {
+    showError('Speech recognition error: ' + e.error);
+    S.recording = false;
+    $btnMic.classList.remove('recording');
+    $btnMicLabel.textContent = 'Start';
+    setStatusText('Error');
+  };
+
+  recognition.onresult = e => {
+    let interimText = '';
+    let finalText = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += t;
+      else interimText += t;
+    }
+    if (finalText) {
+      S.transcript += finalText;
+      maybeSplitAndSubmit(S.transcript, false);
+    }
+    S.interim = interimText;
+    renderTranscript();
+  };
+
+  return true;
+}
+
+/**
+ * Split accumulated transcript into sentences and submit any that are
+ * complete (end with sentence-terminal punctuation, or flush=true for all).
+ * Deduplicates via submittedSentences Set.
+ */
+function maybeSplitAndSubmit(text, flush) {
+  // Split on sentence-ending punctuation followed by whitespace or end
+  const re = /[^.!?]+[.!?]+[\s]*/g;
+  const sentences = [];
+  let m;
+  while ((m = re.exec(text)) !== null) sentences.push(m[0].trim());
+
+  // If flush, also pick up any trailing fragment without terminal punctuation
+  if (flush) {
+    const matched = sentences.join(' ');
+    const remainder = text.slice(matched.length).trim();
+    if (remainder) sentences.push(remainder);
+  }
+
+  sentences.forEach(s => {
+    if (!s) return;
+    const sid = slug(s);
+    if (submittedSentences.has(sid)) return;
+    submittedSentences.add(sid);
+    submitSentence(sid, s);
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STT — Groq Whisper path (MediaRecorder → /api/stt, chunked)
+   ═══════════════════════════════════════════════════════════════════════════
+
+   How chunked transcription works
+   ────────────────────────────────
+   MediaRecorder.start(CHUNK_MS) fires ondataavailable every CHUNK_MS.
+   Each chunk is sent to /api/stt independently and immediately, so the
+   transcript grows while the user is still speaking.
+
+   Responses are appended via a serial promise chain (groqChain) so they
+   are always appended in the order they were sent, even if Groq returns
+   them slightly out of order.
+
+   A groqSessionId is incremented on every new recording start and on
+   Reset.  Any response that arrives after the session it belongs to has
+   ended is silently dropped, preventing stale text from landing after
+   Stop or Reset.
+
+   The Stop button stays in "recording" state until the final chunk
+   response has been processed (onstop resolves groqChain).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const CHUNK_MS = 4000;   // send a new chunk to Groq every 4 s
+
+async function startGroqRecording() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showError('Microphone access denied: ' + err.message);
+    return;
+  }
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : 'audio/webm';
+
+  // Increment session id so any stale callbacks from the previous session
+  // are ignored.
+  const sessionId = ++S.groqSessionId;
+
+  // Serial promise chain — each chunk appends to it so responses land
+  // in the same order as the requests, regardless of Groq latency variance.
+  let groqChain = Promise.resolve();
+
+  // Full-stream accumulation strategy
+  // ───────────────────────────────────
+  // Problem with prepend-headers approach:
+  //   MediaRecorder chunk 0 contains both the EBML/Tracks header AND the
+  //   first 4 s of audio data.  Uploading Blob([chunk0, chunkN]) therefore
+  //   sends the first 4 s of audio a second time on every subsequent request.
+  //   Whisper faithfully transcribes those repeated seconds, so the first
+  //   sentence appears in every Whisper response — causing the "Mumbai …"
+  //   repetition loop.
+  //
+  // Fix: accumulate every raw chunk in order and always upload the full
+  //   growing stream (Blob of all chunks so far).  Because the full stream
+  //   starts with chunk 0 it is always a valid, independently decodable WebM.
+  //   Whisper returns the complete transcript of everything recorded so far,
+  //   which we use to REPLACE (not append to) S.transcript.  The existing
+  //   submittedSentences Set prevents any already-submitted sentence from
+  //   being fact-checked a second time.
+  const allChunks = [];   // every raw chunk in recording order
+
+  const recorder = new MediaRecorder(stream, { mimeType });
+  S.groqRecorder = recorder;
+
+  // Fired every CHUNK_MS while recording, and once more on stop.
+  recorder.ondataavailable = e => {
+    if (e.data.size === 0) return;
+
+    allChunks.push(e.data);
+
+    // Build a valid WebM from the complete stream recorded so far.
+    // Chunk 0 always contains the EBML header + Tracks, so this is always
+    // decodable regardless of how many chunks have accumulated.
+    const uploadBlob = new Blob(allChunks, { type: mimeType });
+    const lang = $langSelect.value.split('-')[0];
+
+    groqChain = groqChain.then(async () => {
+      // Drop if session ended (Reset pressed)
+      if (S.groqSessionId !== sessionId) return;
+
+      const fd = new FormData();
+      fd.append('audio', uploadBlob, 'audio.webm');
+      fd.append('lang', lang);
+
+      try {
+        const resp = await fetch('/api/stt', { method: 'POST', body: fd });
+        const data = await resp.json();
+
+        // Drop stale response
+        if (S.groqSessionId !== sessionId) return;
+
+        if (data.error) { showError('Groq STT: ' + data.error); return; }
+        const text = (data.text || '').trim();
+        if (!text) return;
+
+        // Replace the transcript with Whisper's full reading of the stream
+        // so far — never append, which would double-count text.
+        S.transcript = text;
+        renderTranscript();
+        maybeSplitAndSubmit(S.transcript, false);
+      } catch (err) {
+        if (S.groqSessionId === sessionId) {
+          showError('STT request failed: ' + err.message);
+        }
+      }
+    });
+  };
+
+  // Called once after recorder.stop() — after the final ondataavailable.
+  // We wait for groqChain to settle so the last chunk is transcribed before
+  // we reset the button state.
+  recorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
+
+    groqChain.finally(() => {
+      // Drop if this is a stale onstop from a previous session
+      if (S.groqSessionId !== sessionId) return;
+
+      // Flush any trailing text that didn't end with punctuation
+      if (S.transcript.trim()) {
+        maybeSplitAndSubmit(S.transcript, true);
+      }
+
+      S.recording = false;
+      $btnMic.classList.remove('recording');
+      $btnMicLabel.textContent = 'Start';
+      setStatusText('Groq Whisper · ready');
+    });
+  };
+
+  // timeslice = CHUNK_MS: ondataavailable fires every CHUNK_MS during recording
+  recorder.start(CHUNK_MS);
+  S.recording = true;
+  $btnMic.classList.add('recording');
+  $btnMicLabel.textContent = 'Stop';
+  setStatusText('Recording · chunk every ' + (CHUNK_MS / 1000) + 's…');
+}
+
+function stopGroqRecording() {
+  // Do NOT clear recording state here — onstop.finally() does it after
+  // the last chunk response arrives.  Only stop the hardware recorder.
+  if (S.groqRecorder && S.groqRecorder.state !== 'inactive') {
+    S.groqRecorder.stop();
+  }
+  // Show "finishing…" while the last chunk is in-flight
+  setStatusText('Finishing…');
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Mic button
+   ═══════════════════════════════════════════════════════════════════════════ */
+$btnMic.addEventListener('click', () => {
+  if (S.cfg.stt_mode === 'groq') {
+    if (S.recording) stopGroqRecording();
+    else startGroqRecording();
+    return;
+  }
+
+  // Browser Web Speech API
+  if (S.recording) {
+    if (recognition) recognition.stop();
+    return;
+  }
+  if (!recognition) {
+    if (!initWebSpeech()) {
+      showError('Web Speech API not available. Add GROQ_API_KEY for server-side STT.');
+      return;
+    }
+  }
+  recognition.lang = $langSelect.value;
+  try { recognition.start(); }
+  catch (e) { showError('Could not start microphone: ' + e.message); }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Reset
+   ═══════════════════════════════════════════════════════════════════════════ */
+$btnReset.addEventListener('click', async () => {
+  // Invalidate any in-flight Groq chunk or onstop callbacks for the current session
+  S.groqSessionId++;
+
+  // Stop hardware recorder (no state change — session id already bumped above)
+  if (S.groqRecorder && S.groqRecorder.state !== 'inactive') {
+    S.groqRecorder.stop();
+  }
+  // Stop Web Speech if active
+  if (recognition && S.recording && S.cfg.stt_mode !== 'groq') {
+    recognition.stop();
+  }
+  S.recording = false;
+  $btnMic.classList.remove('recording');
+  $btnMicLabel.textContent = 'Start';
+
+  // Close all SSE streams
+  Object.values(S.sseStreams).forEach(es => es.close());
+  S.sseStreams = {};
+
+  // Clear state
+  S.claims = {};
+  S.sentences = [];
+  S.sentenceMap = {};
+  S.claimToSentence = {};
+  S.transcript = '';
+  S.interim = '';
+  submittedSentences.clear();
+
+  renderTranscript();
+  updateCounter();
+
+  // Remove all sentence cards
+  const cards = $claimsArea.querySelectorAll('.s-card');
+  cards.forEach(c => c.remove());
+  $emptyState.style.display = '';
+
+  try { await fetch('/api/reset', { method: 'POST' }); } catch {}
+  toast('Session reset');
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Status text helper
+   ═══════════════════════════════════════════════════════════════════════════ */
+function setStatusText(text) {
+  $sttStatus.textContent = text;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Bootstrap
+   ═══════════════════════════════════════════════════════════════════════════ */
+(async () => {
+  // 1. Fetch config to know which STT mode to use
+  try {
+    const r = await fetch('/api/config');
+    S.cfg = await r.json();
+  } catch {}
+
+  if (S.cfg.stt_mode === 'groq') {
+    setStatusText('Groq Whisper · ready');
+  } else {
+    // Check browser support
+    if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+      setStatusText('Web Speech unavailable');
+      $btnMic.disabled = true;
+      showError('Web Speech API requires Chrome or Edge. Set GROQ_API_KEY for server-side STT.');
+    } else {
+      setStatusText('Web Speech · ready');
+    }
+  }
+
+  // 2. Load any claims from a previous session
+  await loadExistingClaims();
+})();
+</script>
+</body>
+</html>
