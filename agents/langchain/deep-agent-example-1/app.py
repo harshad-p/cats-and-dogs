@@ -2,7 +2,7 @@
 
 Architecture
 ------------
-Browser (Web Speech API)
+Browser (Web Speech API / Groq Whisper)
   └─► POST /api/transcript          raw transcript text
         └─► Nemotron-3_5-Lightning  structured claim extraction (tool call)
               └─► for each new/corrected claim
@@ -17,7 +17,9 @@ TAVILY_API_KEY   required — Tavily web search
 GROQ_API_KEY     optional — enables server-side Whisper via Groq (fast cloud STT)
 """
 
+import ast
 import hashlib
+import io
 import json
 import logging
 import os
@@ -26,14 +28,31 @@ import re
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Generator
+from urllib.parse import urlparse
 
 import openai
 from deepagents import create_deep_agent
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
+from langchain_core.messages import ToolMessage
 from langchain_nebius import ChatNebius
 from langchain_tavily import TavilySearch
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.platypus import (
+    HRFlowable,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 load_dotenv()
 
@@ -309,7 +328,12 @@ def _sources_from_research(research_text: str) -> list[dict]:
         url = m.group(2).rstrip(").,")
         if url not in seen:
             seen.add(url)
-            sources.append({"title": title, "url": url, "supports_claim": False})
+            sources.append({
+                "title": title,
+                "url": url,
+                "domain": _domain(url),
+                "supports_claim": None,
+            })
 
     # Bare URLs not caught above
     bare_pattern = re.compile(r"https?://\S+")
@@ -317,9 +341,184 @@ def _sources_from_research(research_text: str) -> list[dict]:
         url = m.group(0).rstrip(").,")
         if url not in seen:
             seen.add(url)
-            sources.append({"title": url, "url": url, "supports_claim": False})
+            sources.append({
+                "title": _domain(url),
+                "url": url,
+                "domain": _domain(url),
+                "supports_claim": None,
+            })
 
     return sources[:10]  # cap at 10
+
+
+def _domain(url: str) -> str:
+    """Return the publisher host, without a leading www."""
+    try:
+        host = urlparse(url).netloc or url
+    except Exception:
+        return url
+    if host.lower().startswith("www."):
+        return host[4:]
+    return host
+
+
+def _is_site_root(url: str) -> bool:
+    """True when a URL is a publisher homepage rather than a specific article.
+
+    Only the site root (and common index paths) count. A short article path
+    is left alone — this does not guess which URL is "the" article.
+    """
+    try:
+        parsed = urlparse((url or "").strip())
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    path = (parsed.path or "").rstrip("/").lower()
+    return path in ("", "index.html", "index.htm", "index.php", "home", "default.aspx")
+
+
+def _url_key(url: str) -> str:
+    """Identity used to dedupe the same page cited with trivial URL differences."""
+    parsed = urlparse((url or "").strip())
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if _is_site_root(url):
+        return host
+    return f"{host}{(parsed.path or '').rstrip('/')}"
+
+
+def _host_key(url: str) -> str:
+    parsed = urlparse((url or "").strip())
+    host = parsed.netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _parse_tool_payload(content):
+    """Parse a Tavily tool result from a string, dict, or content-block list."""
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, list):
+        if content and all(isinstance(item, dict) and item.get("url") for item in content):
+            return {"results": content}
+        texts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                texts.append(block)
+            elif isinstance(block, dict):
+                texts.append(str(block.get("text") or block.get("content") or ""))
+        content = "\n".join(texts)
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        return {"results": parsed}
+    start = text.find("{")
+    end = text.rfind("}")
+    snippet = text[start:end + 1] if start != -1 and end > start else text
+    for candidate in (snippet, text):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return parsed if isinstance(parsed, dict) else {"results": parsed}
+        try:
+            parsed = ast.literal_eval(candidate)
+        except (ValueError, SyntaxError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"results": parsed}
+    return None
+
+
+def _sources_from_tavily_messages(messages: list) -> list[dict]:
+    """Extract article URLs from Tavily tool results in the agent history.
+
+    Homepage links come from MiniMax's free-text report, not from Tavily.
+    The model often shortens a result such as
+    ``https://www.washingtonpost.com/politics/2024/…/story/`` to
+    ``https://www.washingtonpost.com/`` when it writes the markdown report.
+    ``_sources_from_research()`` can only see that paraphrased text.
+
+    The tool messages still hold Tavily's JSON, including the original
+    ``title`` and ``url``. Those values are copied verbatim. Nothing in
+    this function builds or guesses a URL.
+    """
+    sources: list[dict] = []
+    seen: set[str] = set()
+
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        name = (getattr(msg, "name", "") or "").lower()
+        if "tavily" not in name:
+            continue
+        payload = _parse_tool_payload(getattr(msg, "content", None))
+        if payload is None:
+            payload = _parse_tool_payload(getattr(msg, "artifact", None))
+        if not isinstance(payload, dict):
+            continue
+        results = payload.get("results") or []
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            url = (result.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            key = _url_key(url)
+            if key in seen:
+                continue
+            seen.add(key)
+            title = (result.get("title") or "").strip() or _domain(url)
+            sources.append({
+                "title": title,
+                "url": url,
+                "domain": _domain(url),
+                "from_tavily": True,
+                "supports_claim": None,
+            })
+
+    return sources
+
+
+def _present_source(source: dict) -> dict:
+    """Shape a source for the UI and the PDF.
+
+    A homepage keeps its search-result title when Tavily supplied it, and is
+    flagged so the UI can say "Homepage" instead of presenting it as an article.
+    A homepage that only appears in model text is labeled with its domain —
+    the model headline is not treated as an article title.
+    """
+    url = (source.get("url") or "").strip()
+    domain = source.get("domain") or _domain(url)
+    title = (source.get("title") or "").strip()
+    homepage = _is_site_root(url)
+    if homepage and not source.get("from_tavily"):
+        title = domain or url
+    elif not title or title == url:
+        title = domain or url
+    presented = {
+        "title": title,
+        "url": url,
+        "domain": domain,
+        "is_homepage": homepage,
+        "supports_claim": source.get("supports_claim") if isinstance(source.get("supports_claim"), bool) else None,
+    }
+    return presented
 
 
 # ── Nemotron: structured verdict from research text ───────────────────────────
@@ -343,7 +542,9 @@ def structured_verdict_nemotron(claim_text: str, research_text: str) -> dict:
                 "content": (
                     "You are a fact-checking analyst. "
                     "Given a claim and a research report, extract a structured verdict. "
-                    "Only use evidence explicitly mentioned in the report. Do NOT fabricate sources."
+                    "Only use evidence explicitly mentioned in the report. Do NOT fabricate sources. "
+                    "Copy source URLs exactly. Do not invent an article URL, and do not "
+                    "replace an article URL with the publisher homepage."
                 ),
             },
             {
@@ -410,7 +611,8 @@ FACT_CHECK_SYSTEM_PROMPT = (
     "You are a fact-checking assistant. "
     "You MUST call the tavily_search tool at least once before writing any conclusion. "
     "Never rely solely on your training knowledge to verify a claim. "
-    "Always cite the URLs of your sources."
+    "Cite the exact article URL returned by the search tool. "
+    "Do not replace an article URL with the publisher homepage."
 )
 
 
@@ -435,13 +637,33 @@ def research_claim(claim_id: str, claim_text: str) -> None:
         )
 
         result = agent.invoke({"messages": [{"role": "user", "content": question}]})
-        research_text = result["messages"][-1].content
+        all_messages = result["messages"]
+        research_text = all_messages[-1].content
+
+        # Extract article URLs verbatim from Tavily ToolMessages — these are
+        # the actual search-result URLs before any LLM paraphrasing.
+        tavily_sources = _sources_from_tavily_messages(all_messages)
+        log.info(
+            "research_claim %s: %d Tavily sources extracted from messages",
+            claim_id, len(tavily_sources),
+        )
 
         # Emit research text for display
         _update_claim(claim_id, status="analyzing", research=research_text)
 
         # Nemotron converts the free-text research into a structured verdict
         vd = structured_verdict_nemotron(claim_text, research_text)
+
+        # Merge sources: prefer Tavily article URLs (verbatim) over LLM-parsed
+        # URLs.  Nemotron's sources (from tool call path) may have supports_claim
+        # annotations; keep those for any URL that Tavily also returned so we
+        # preserve the annotation.  Add any Tavily URL not already present.
+        merged = _merge_sources(
+            vd.get("sources") or [],
+            tavily_sources,
+            research_text if isinstance(research_text, str) else "",
+        )
+
         _update_claim(
             claim_id,
             status="done",
@@ -449,7 +671,7 @@ def research_claim(claim_id: str, claim_text: str) -> None:
             one_liner=vd["one_liner"],
             explanation=vd["explanation"],
             confidence=vd["confidence"],
-            sources=vd["sources"],
+            sources=merged,
         )
 
     except Exception as exc:
@@ -466,6 +688,378 @@ def research_claim(claim_id: str, claim_text: str) -> None:
     finally:
         # Signal stream end
         _push_sse(claim_id, "done", {"claim_id": claim_id})
+
+
+def _merge_sources(
+    nemotron_sources: list[dict],
+    tavily_sources: list[dict],
+    research_text: str = "",
+) -> list[dict]:
+    """Prefer Tavily article URLs over homepage citations written by the model.
+
+    Tavily titles and URLs are kept verbatim. A model-written URL is added
+    only when no Tavily results exist, or when that exact URL appears in the
+    research report. A homepage is dropped when the same host already has a
+    more specific URL — the homepage is not shown as a second "article".
+    No URL is constructed.
+    """
+    merged: list[dict] = []
+    index_by_key: dict[str, int] = {}
+    report = research_text or ""
+
+    def _add(raw: dict, *, from_tavily: bool, require_verbatim: bool) -> None:
+        if not isinstance(raw, dict):
+            return
+        url = (raw.get("url") or "").strip().rstrip(").,")
+        if not url.startswith(("http://", "https://")):
+            return
+        key = _url_key(url)
+        if key in index_by_key:
+            existing = merged[index_by_key[key]]
+            if isinstance(raw.get("supports_claim"), bool):
+                existing["supports_claim"] = raw["supports_claim"]
+            if from_tavily:
+                existing["from_tavily"] = True
+                existing["url"] = url
+                title = (raw.get("title") or "").strip()
+                if title:
+                    existing["title"] = title
+                existing["domain"] = _domain(url)
+            return
+        if require_verbatim and url not in report:
+            return
+        entry = {
+            "title": (raw.get("title") or "").strip(),
+            "url": url,
+            "domain": raw.get("domain") or _domain(url),
+            "from_tavily": from_tavily or bool(raw.get("from_tavily")),
+            "supports_claim": raw.get("supports_claim") if isinstance(raw.get("supports_claim"), bool) else None,
+        }
+        index_by_key[key] = len(merged)
+        merged.append(entry)
+
+    for source in tavily_sources or []:
+        _add(source, from_tavily=True, require_verbatim=False)
+    # When Tavily returned results, ignore model URLs that are not verbatim
+    # in the report. Those are the paraphrased homepage links.
+    for source in nemotron_sources or []:
+        _add(source, from_tavily=False, require_verbatim=bool(tavily_sources))
+
+    article_hosts = {
+        _host_key(source["url"])
+        for source in merged
+        if not _is_site_root(source["url"])
+    }
+    presented: list[dict] = []
+    for source in merged:
+        if _is_site_root(source["url"]) and _host_key(source["url"]) in article_hosts:
+            continue
+        presented.append(_present_source(source))
+        if len(presented) >= 10:
+            break
+    return presented
+
+
+def _verdict_counts(claims_snapshot: list[dict]) -> dict[str, int]:
+    """Count each claim once. Superseded claims are excluded.
+
+    Failed checks stay in FAILED even though the pipeline stores
+    INSUFFICIENT_EVIDENCE on the error record. Pending checks are not
+    given a verdict.
+    """
+    counts = {
+        "SUPPORTED": 0,
+        "CONTRADICTED": 0,
+        "MISLEADING": 0,
+        "INSUFFICIENT_EVIDENCE": 0,
+        "PENDING": 0,
+        "FAILED": 0,
+    }
+    for claim in claims_snapshot:
+        status = claim.get("status")
+        if status == "done":
+            verdict = claim.get("verdict")
+            if verdict not in _VERDICT_ENUM:
+                verdict = "INSUFFICIENT_EVIDENCE"
+            counts[verdict] += 1
+        elif status == "error":
+            counts["FAILED"] += 1
+        elif status == "superseded":
+            continue
+        else:
+            counts["PENDING"] += 1
+    return counts
+
+
+# ── PDF report generation ─────────────────────────────────────────────────────
+
+_VERDICT_COLOUR = {
+    "SUPPORTED":            colors.HexColor("#3fb068"),
+    "CONTRADICTED":         colors.HexColor("#e8524a"),
+    "MISLEADING":           colors.HexColor("#d4a72c"),
+    "INSUFFICIENT_EVIDENCE": colors.HexColor("#636b82"),
+}
+_VERDICT_FRIENDLY = {
+    "SUPPORTED":            "Supported",
+    "CONTRADICTED":         "Contradicted",
+    "MISLEADING":           "Misleading",
+    "INSUFFICIENT_EVIDENCE": "Insufficient evidence",
+}
+_FAILED_COLOUR = colors.HexColor("#e07830")
+_PENDING_COLOUR = colors.HexColor("#4d8ef0")
+_SUPERSEDED_COLOUR = colors.HexColor("#9e7fe8")
+
+
+def _pdf_text(value) -> str:
+    """Escape text for a ReportLab paragraph. Newlines become line breaks."""
+    text = "" if value is None else str(value)
+    text = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    return text.replace("\n", "<br/>")
+
+
+def _pdf_attr(value: str) -> str:
+    return (
+        (value or "")
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "")
+        .replace(">", "")
+    )
+
+def _build_pdf(claims_snapshot: list[dict]) -> bytes:
+    """Render a ReportLab PDF from the current claims state.
+
+    Returns raw PDF bytes.  Never includes API keys or secrets.
+    All source URLs are taken verbatim from the claims data —
+    nothing is fabricated.
+    """
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=2.2 * cm,
+        rightMargin=2.2 * cm,
+        topMargin=2 * cm,
+        bottomMargin=2.2 * cm,
+        title="Live Fact Checker — Report",
+        author="Live Fact Checker",
+    )
+
+    styles = getSampleStyleSheet()
+    W = A4[0] - 4.4 * cm   # usable text width
+
+    # Custom styles
+    sTitle = ParagraphStyle(
+        "sTitle",
+        parent=styles["Heading1"],
+        fontSize=20, leading=26, spaceAfter=4,
+        textColor=colors.HexColor("#1f2328"),
+    )
+    sMeta = ParagraphStyle(
+        "sMeta",
+        parent=styles["Normal"],
+        fontSize=9, textColor=colors.HexColor("#57606a"),
+        spaceAfter=16,
+    )
+    sH2 = ParagraphStyle(
+        "sH2",
+        parent=styles["Heading2"],
+        fontSize=13, leading=18, spaceBefore=14, spaceAfter=6,
+        textColor=colors.HexColor("#1f2328"),
+    )
+    sBodyText = ParagraphStyle(
+        "sBody",
+        parent=styles["Normal"],
+        fontSize=10, leading=15, spaceAfter=6,
+        textColor=colors.HexColor("#1f2328"),
+    )
+    sMuted = ParagraphStyle(
+        "sMuted",
+        parent=styles["Normal"],
+        fontSize=9, leading=13, spaceAfter=4,
+        textColor=colors.HexColor("#57606a"),
+    )
+    sClaimText = ParagraphStyle(
+        "sClaimText",
+        parent=styles["Normal"],
+        fontSize=10, leading=15, spaceAfter=4,
+        textColor=colors.HexColor("#1f2328"),
+        fontName="Helvetica-Bold",
+    )
+    sSourceLink = ParagraphStyle(
+        "sSourceLink",
+        parent=styles["Normal"],
+        fontSize=9, leading=13,
+        textColor=colors.HexColor("#3b82d4"),
+    )
+
+    def page_footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#57606a"))
+        canvas.drawString(2.2 * cm, 1.2 * cm, "Live Fact Checker")
+        canvas.drawRightString(A4[0] - 2.2 * cm, 1.2 * cm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    story = []
+
+    # ── Title block ────────────────────────────────────────────────────────────
+    ts = datetime.now(timezone.utc).strftime("%d %B %Y %H:%M UTC")
+    story.append(Paragraph("Fact-Check Report", sTitle))
+    story.append(Paragraph(f"Generated {ts}", sMeta))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb"), spaceAfter=12))
+
+    # ── Summary table ──────────────────────────────────────────────────────────
+    counts = _verdict_counts(claims_snapshot)
+
+    story.append(Paragraph("Summary", sH2))
+    story.append(Paragraph(
+        "Completed checks are counted once, by verdict. "
+        "Pending and failed checks are listed separately and are not treated as finished verdicts. "
+        "Superseded claims are omitted from these totals.",
+        sMuted,
+    ))
+    summary_data = [["Verdict", "Count"]]
+    for v_key in ("SUPPORTED", "CONTRADICTED", "MISLEADING", "INSUFFICIENT_EVIDENCE"):
+        summary_data.append([_VERDICT_FRIENDLY[v_key], str(counts[v_key])])
+    summary_data.append(["Pending", str(counts["PENDING"])])
+    summary_data.append(["Failed", str(counts["FAILED"])])
+
+    tbl = Table(summary_data, colWidths=[W * 0.7, W * 0.3])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",  (0, 0), (-1, 0), colors.HexColor("#f7f8fa")),
+        ("FONTNAME",    (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE",    (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR",   (0, 0), (-1, 0), colors.HexColor("#1f2328")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f8fa")]),
+        ("GRID",        (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+        ("LEFTPADDING",  (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING",   (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 5),
+        ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 0.4 * cm))
+
+    # ── Per-claim sections ─────────────────────────────────────────────────────
+    story.append(Paragraph("Claims", sH2))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb"), spaceAfter=8))
+
+    pill_width = 4.8 * cm
+    for idx, c in enumerate(claims_snapshot, 1):
+        verdict = c.get("verdict") or ""
+        status = c.get("status") or "queued"
+        if status == "error":
+            v_label, v_colour = "Failed", _FAILED_COLOUR
+        elif status in ("queued", "researching", "analyzing"):
+            v_label, v_colour = "Pending", _PENDING_COLOUR
+        elif status == "superseded":
+            v_label, v_colour = "Superseded", _SUPERSEDED_COLOUR
+        else:
+            v_label = _VERDICT_FRIENDLY.get(verdict, "Insufficient evidence")
+            v_colour = _VERDICT_COLOUR.get(verdict, colors.HexColor("#636b82"))
+
+        pill = Table([[v_label]], colWidths=[pill_width])
+        pill.setStyle(TableStyle([
+            ("BACKGROUND",   (0, 0), (-1, -1), v_colour),
+            ("TEXTCOLOR",    (0, 0), (-1, -1), colors.white),
+            ("FONTNAME",     (0, 0), (-1, -1), "Helvetica-Bold"),
+            ("FONTSIZE",     (0, 0), (-1, -1), 8),
+            ("ALIGN",        (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING",   (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
+            ("LEFTPADDING",  (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        header_row = Table(
+            [[Paragraph(f"Claim {idx}", sMuted), pill]],
+            colWidths=[W - pill_width - 0.4 * cm, pill_width],
+        )
+        header_row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+
+        block: list = [header_row, Spacer(1, 0.15 * cm)]
+        spoken = (c.get("sentence") or "").strip()
+        claim_text = (c.get("text") or "").strip()
+        block.append(Paragraph("Spoken sentence", sMuted))
+        block.append(Paragraph(
+            _pdf_text(spoken) if spoken else "Not stored for this claim.",
+            sBodyText,
+        ))
+        block.append(Paragraph("Extracted claim", sMuted))
+        block.append(Paragraph(_pdf_text(claim_text) or "—", sClaimText))
+
+        if status in ("queued", "researching", "analyzing"):
+            block.append(Paragraph(
+                "Research in progress. This check is not completed.",
+                sMuted,
+            ))
+        elif status == "error":
+            reason = (c.get("explanation") or "The research request failed.")[:400]
+            block.append(Paragraph(
+                "Research failed. This check is not completed. "
+                + _pdf_text(reason),
+                sMuted,
+            ))
+        elif status == "superseded":
+            previous = _VERDICT_FRIENDLY.get(verdict)
+            note = "Superseded by a later correction. Excluded from the verdict totals."
+            if previous:
+                note += f" Earlier verdict: {previous}."
+            block.append(Paragraph(note, sMuted))
+        else:
+            if c.get("one_liner"):
+                block.append(Paragraph(_pdf_text(c["one_liner"]), sBodyText))
+            if c.get("explanation"):
+                block.append(Paragraph("Explanation", sMuted))
+                block.append(Paragraph(_pdf_text(c["explanation"]), sBodyText))
+            conf = c.get("confidence")
+            if isinstance(conf, (int, float)):
+                block.append(Paragraph(f"Confidence: {int(conf * 100)}%", sMuted))
+            sources = c.get("sources") or []
+            block.append(Paragraph("Sources", sMuted))
+            if not sources:
+                block.append(Paragraph("No sources were returned for this check.", sMuted))
+            for source in sources:
+                url = (source.get("url") or "").strip()
+                title = (source.get("title") or url).strip()
+                domain = source.get("domain") or (_domain(url) if url else "")
+                supports = source.get("supports_claim")
+                if supports is True:
+                    relation = "Supports the claim. "
+                elif supports is False:
+                    relation = "Disputes the claim. "
+                else:
+                    relation = ""
+                kind = "Homepage" if source.get("is_homepage") else (domain or "Source")
+                if url:
+                    block.append(Paragraph(
+                        f'{relation}<link href="{_pdf_attr(url)}">{_pdf_text(title)}</link>'
+                        f' <font color="#57606a">({_pdf_text(kind)})</font>',
+                        sSourceLink,
+                    ))
+                else:
+                    block.append(Paragraph(_pdf_text(title), sMuted))
+
+        block.append(Spacer(1, 0.25 * cm))
+        block.append(HRFlowable(
+            width="100%", thickness=0.5,
+            color=colors.HexColor("#e5e7eb"), spaceAfter=8,
+        ))
+        story.append(KeepTogether(block))
+
+    doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+    return buf.getvalue()
 
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
@@ -507,6 +1101,7 @@ def api_transcript():
             claims[cid] = {
                 "id": cid,
                 "text": c["text"],
+                "sentence": transcript,
                 "status": "queued",
                 "verdict": None,
                 "one_liner": None,
@@ -623,6 +1218,32 @@ def api_reset():
     with claims_lock:
         claims.clear()
     return jsonify({"ok": True})
+
+
+@app.route("/api/report", methods=["GET"])
+def api_report():
+    """Generate and return a PDF fact-check report from current session claims."""
+    with claims_lock:
+        snapshot = list(claims.values())
+
+    if not snapshot:
+        return jsonify({"error": "No claims in this session"}), 400
+
+    try:
+        pdf_bytes = _build_pdf(snapshot)
+    except Exception as exc:
+        log.exception("PDF generation failed")
+        return jsonify({"error": str(exc)}), 500
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    filename = f"fact-check-report-{ts}.pdf"
+
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 if __name__ == "__main__":

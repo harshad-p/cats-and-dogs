@@ -10,6 +10,7 @@ Covers the three failure modes identified in the original bug:
 """
 
 import json
+import re
 import sys
 import types
 import unittest
@@ -62,6 +63,7 @@ def _make_fake_modules():
     flask_mod.jsonify = MagicMock  # type: ignore[attr-defined]
     flask_mod.render_template = MagicMock  # type: ignore[attr-defined]
     flask_mod.request = MagicMock  # type: ignore[attr-defined]
+    flask_mod.send_file = MagicMock  # type: ignore[attr-defined]
     flask_mod.stream_with_context = lambda g: g  # type: ignore[attr-defined]
     sys.modules["flask"] = flask_mod
 
@@ -84,11 +86,16 @@ _spec = importlib.util.spec_from_file_location(
 _app = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
 _spec.loader.exec_module(_app)  # type: ignore[union-attr]
 
-_normalise_verdict          = _app._normalise_verdict
-_parse_xml_tool_content     = _app._parse_xml_tool_content
+_normalise_verdict             = _app._normalise_verdict
+_parse_xml_tool_content        = _app._parse_xml_tool_content
 _extract_verdict_from_research = _app._extract_verdict_from_research
-_sources_from_research      = _app._sources_from_research
-structured_verdict_nemotron = _app.structured_verdict_nemotron
+_sources_from_research         = _app._sources_from_research
+_sources_from_tavily_messages  = _app._sources_from_tavily_messages
+_merge_sources                 = _app._merge_sources
+_domain                        = _app._domain
+_verdict_counts                = _app._verdict_counts
+_build_pdf                     = _app._build_pdf
+structured_verdict_nemotron    = _app.structured_verdict_nemotron
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -367,6 +374,214 @@ class TestStructuredVerdictNemotron(unittest.TestCase):
 
         self.assertEqual(result["verdict"], "INSUFFICIENT_EVIDENCE")
         self.assertEqual(result["sources"], [])   # nothing to fabricate
+
+
+ARTICLE_URL = "https://www.washingtonpost.com/politics/2024/03/01/senate-vote-story/"
+HOMEPAGE_URL = "https://www.washingtonpost.com/"
+NASA_URL = "https://www.nasa.gov/history/90-years-of-our-changing-views-of-earth"
+
+
+def _tool_message(name: str, content):
+    from langchain_core.messages import ToolMessage
+    return ToolMessage(content=content, tool_call_id="call-1", name=name)
+
+
+class TestTavilySourceExtraction(unittest.TestCase):
+    def test_json_string_preserves_article_url_and_title(self):
+        payload = json.dumps({
+            "results": [{
+                "title": "Senate vote stalls",
+                "url": ARTICLE_URL,
+                "content": "The Senate voted…",
+            }]
+        })
+        sources = _sources_from_tavily_messages([
+            _tool_message("tavily_search", payload),
+        ])
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["url"], ARTICLE_URL)
+        self.assertEqual(sources[0]["title"], "Senate vote stalls")
+        self.assertEqual(sources[0]["domain"], "washingtonpost.com")
+        self.assertFalse(sources[0]["is_homepage"] if "is_homepage" in sources[0] else _app._is_site_root(sources[0]["url"]))
+
+    def test_dict_content_and_ignores_other_tools(self):
+        messages = [
+            _tool_message("write_todos", '{"results":[{"title":"nope","url":"https://example.com/x"}]}'),
+            _tool_message("tavily_search", {
+                "results": [{"title": "NASA history", "url": NASA_URL}],
+            }),
+        ]
+        sources = _sources_from_tavily_messages(messages)
+        self.assertEqual([s["url"] for s in sources], [NASA_URL])
+
+    def test_content_blocks(self):
+        payload = json.dumps({"results": [{"title": "Wiki", "url": "https://en.wikipedia.org/wiki/Earth"}]})
+        sources = _sources_from_tavily_messages([
+            _tool_message("tavily_search", [{"type": "text", "text": payload}]),
+        ])
+        self.assertEqual(sources[0]["url"], "https://en.wikipedia.org/wiki/Earth")
+
+
+class TestMergeSources(unittest.TestCase):
+    def test_drops_homepage_when_article_exists(self):
+        tavily = [{
+            "title": "Senate vote stalls",
+            "url": ARTICLE_URL,
+            "from_tavily": True,
+            "supports_claim": None,
+        }]
+        nemotron = [{
+            "title": "How the Senate vote reshaped the bill",
+            "url": HOMEPAGE_URL,
+            "supports_claim": True,
+        }]
+        report = f"The Washington Post: {HOMEPAGE_URL}\nAlso see {ARTICLE_URL}"
+        merged = _merge_sources(nemotron, tavily, report)
+        urls = [s["url"] for s in merged]
+        self.assertEqual(urls, [ARTICLE_URL])
+        self.assertEqual(merged[0]["title"], "Senate vote stalls")
+        self.assertFalse(merged[0]["is_homepage"])
+
+    def test_homepage_only_is_labeled_not_an_article(self):
+        nemotron = [{
+            "title": "How the Senate vote reshaped the bill",
+            "url": HOMEPAGE_URL,
+            "supports_claim": False,
+        }]
+        merged = _merge_sources(nemotron, [], "")
+        self.assertEqual(len(merged), 1)
+        self.assertTrue(merged[0]["is_homepage"])
+        self.assertEqual(merged[0]["url"], HOMEPAGE_URL)
+        self.assertEqual(merged[0]["title"], "washingtonpost.com")
+
+    def test_does_not_keep_url_absent_from_tavily_and_report(self):
+        tavily = [{"title": "NASA", "url": NASA_URL, "from_tavily": True}]
+        nemotron = [{"title": "Invented", "url": "https://example.com/invented-article", "supports_claim": True}]
+        merged = _merge_sources(nemotron, tavily, "See NASA only.")
+        self.assertEqual([s["url"] for s in merged], [NASA_URL])
+
+    def test_copies_support_annotation_onto_tavily_url(self):
+        tavily = [{"title": "NASA history", "url": NASA_URL, "from_tavily": True}]
+        nemotron = [{"title": "NASA", "url": NASA_URL, "supports_claim": True}]
+        merged = _merge_sources(nemotron, tavily, "")
+        self.assertTrue(merged[0]["supports_claim"])
+        self.assertEqual(merged[0]["title"], "NASA history")
+
+    def test_keeps_verbatim_article_from_report_when_tavily_missed_it(self):
+        extra = "https://en.wikipedia.org/wiki/Spherical_Earth"
+        tavily = [{"title": "NASA history", "url": NASA_URL, "from_tavily": True}]
+        nemotron = [{"title": "Spherical Earth", "url": extra, "supports_claim": False}]
+        merged = _merge_sources(nemotron, tavily, f"Wikipedia: {extra}")
+        urls = [s["url"] for s in merged]
+        self.assertIn(NASA_URL, urls)
+        self.assertIn(extra, urls)
+
+
+class TestVerdictCounts(unittest.TestCase):
+    def test_counts_each_claim_once_and_ignores_superseded(self):
+        claims = [
+            {"status": "done", "verdict": "SUPPORTED"},
+            {"status": "done", "verdict": "CONTRADICTED"},
+            {"status": "done", "verdict": "MISLEADING"},
+            {"status": "done", "verdict": "INSUFFICIENT_EVIDENCE"},
+            {"status": "researching"},
+            {"status": "error", "verdict": "INSUFFICIENT_EVIDENCE"},
+            {"status": "superseded", "verdict": "SUPPORTED"},
+        ]
+        counts = _verdict_counts(claims)
+        self.assertEqual(counts["SUPPORTED"], 1)
+        self.assertEqual(counts["CONTRADICTED"], 1)
+        self.assertEqual(counts["MISLEADING"], 1)
+        self.assertEqual(counts["INSUFFICIENT_EVIDENCE"], 1)
+        self.assertEqual(counts["PENDING"], 1)
+        self.assertEqual(counts["FAILED"], 1)
+
+    def test_done_then_error_transition_is_not_double_counted(self):
+        claim = {"status": "done", "verdict": "SUPPORTED"}
+        self.assertEqual(_verdict_counts([claim])["SUPPORTED"], 1)
+        claim["status"] = "error"
+        counts = _verdict_counts([claim])
+        self.assertEqual(counts["SUPPORTED"], 0)
+        self.assertEqual(counts["FAILED"], 1)
+
+
+class TestBuildPdf(unittest.TestCase):
+    def _snapshot(self):
+        long_explanation = ("Evidence paragraph. " * 80).strip()
+        claims = []
+        verdicts = [
+            "SUPPORTED", "CONTRADICTED", "MISLEADING", "INSUFFICIENT_EVIDENCE",
+            "SUPPORTED", "CONTRADICTED",
+        ]
+        for i, verdict in enumerate(verdicts):
+            claims.append({
+                "text": f"Extracted claim {i} & <details>",
+                "sentence": f"The speaker said sentence {i}.",
+                "status": "done",
+                "verdict": verdict,
+                "one_liner": f"One liner {i}",
+                "explanation": long_explanation,
+                "confidence": 0.8,
+                "sources": [{
+                    "title": "NASA changing views",
+                    "url": NASA_URL + f"?q={i}&x=1",
+                    "domain": "nasa.gov",
+                    "is_homepage": False,
+                    "supports_claim": True,
+                }] if i % 2 == 0 else [],
+            })
+        claims.append({
+            "text": "Still checking this.",
+            "sentence": "I think this might be true.",
+            "status": "researching",
+            "verdict": None,
+            "sources": [],
+        })
+        claims.append({
+            "text": "Lookup failed.",
+            "sentence": "Something went wrong in the sentence.",
+            "status": "error",
+            "verdict": "INSUFFICIENT_EVIDENCE",
+            "explanation": "timeout & <broken>",
+            "sources": [],
+        })
+        return claims
+
+    def test_pdf_has_sections_links_and_multiple_pages(self):
+        pdf = _build_pdf(self._snapshot())
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        page_count = len(re.findall(rb"/Type\s*/Page(?!s)", pdf))
+        self.assertGreaterEqual(page_count, 2)
+        self.assertIn(b"/URI", pdf)
+        self.assertIn(NASA_URL.encode(), pdf)
+
+        import base64
+        import zlib
+        texts = []
+        for match in re.finditer(rb"stream\r?\n", pdf):
+            start = match.end()
+            end = pdf.find(b"endstream", start)
+            raw = pdf[start:end].strip()
+            try:
+                if b"~>" in raw:
+                    raw = raw[:raw.rfind(b"~>")]
+                texts.append(zlib.decompress(base64.a85decode(raw)).decode("latin1"))
+            except Exception:
+                texts.append(raw.decode("latin1", errors="ignore"))
+        blob = "\n".join(texts)
+        self.assertIn("Fact-Check Report", blob)
+        self.assertIn("Supported", blob)
+        self.assertIn("Insufficient evidence", blob)
+        self.assertIn("Pending", blob)
+        self.assertIn("Failed", blob)
+        self.assertIn("Spoken sentence", blob)
+        self.assertIn("The speaker said sentence 0.", blob)
+        self.assertIn("Extracted claim 0", blob)
+        self.assertIn("Research in progress", blob)
+        self.assertIn("Research failed", blob)
+        self.assertIn("No sources were returned", blob)
+        self.assertIn("Research failed. This check is not completed. timeout &", blob)
+        self.assertIn("(broken)", blob)
 
 
 if __name__ == "__main__":

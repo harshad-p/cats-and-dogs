@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=1.26",
     "openai>=1.0",
     "python-dotenv>=1.2.2",
+    "reportlab>=5.0.1",
     "scipy>=1.13",
     "sounddevice>=0.4",
     "tavily-python>=0.7.24",
