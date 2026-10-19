@@ -210,15 +210,25 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Confidence bar ─────────────────────────────────────────────────────────── */
+/* ── Confidence score ───────────────────────────────────────────────────────── */
+.conf-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 6px 0 8px;
+}
+.conf-label {
+  flex-shrink: 0;
+  font-size: 11px; font-weight: 600; color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
 .conf-bar {
-  height: 2px; background: var(--border);
-  border-radius: 2px; margin: 7px 0 6px; overflow: hidden;
+  flex: 1; height: 4px; background: var(--border);
+  border-radius: 2px; overflow: hidden;
 }
 .conf-fill { height: 100%; border-radius: 2px; transition: width .5s; }
-.SUPPORTED    .conf-fill { background: var(--green);  }
-.CONTRADICTED .conf-fill { background: var(--red);    }
-.MISLEADING   .conf-fill { background: var(--yellow); }
+.SUPPORTED             .conf-fill { background: var(--green);  }
+.CONTRADICTED          .conf-fill { background: var(--red);    }
+.MISLEADING            .conf-fill { background: var(--yellow); }
+.INSUFFICIENT_EVIDENCE .conf-fill { background: var(--muted);  }
 
 /* ── Explanation & one-liner ────────────────────────────────────────────────── */
 .c-one-liner {
@@ -634,9 +644,14 @@ function renderClaimBlock(claimId) {
     return c.verdict ? verdictLabel(c.verdict) : c.status;
   })();
 
-  const pct = (c.confidence != null) ? Math.round(c.confidence * 100) : 0;
-  const confBar = (c.verdict && pct > 0)
-    ? '<div class="conf-bar"><div class="conf-fill" style="width:' + pct + '%"></div></div>'
+  const pct = (c.status === 'done' && c.confidence != null && !Number.isNaN(Number(c.confidence)))
+    ? Math.round(Number(c.confidence) * 100)
+    : null;
+  const confBar = (pct != null)
+    ? '<div class="conf-row">' +
+        '<span class="conf-label">Confidence ' + pct + '%</span>' +
+        '<div class="conf-bar"><div class="conf-fill" style="width:' + Math.max(0, Math.min(100, pct)) + '%"></div></div>' +
+      '</div>'
     : '';
 
   const sourcesHtml  = renderSourcesHtml(c.sources);
@@ -655,7 +670,7 @@ function renderClaimBlock(claimId) {
       '<span class="c-claim-text">' + esc(c.text) + '</span>' +
       '<span class="badge ' + badgeClass_ + '">' + badgeLabel_ + '</span>' +
     '</div>' +
-    confBar + oneLiner + explanation + sourcesHtml + progressHtml;
+    oneLiner + explanation + confBar + sourcesHtml + progressHtml;
 }
 
 function verdictLabel(v) {
