@@ -1,8 +1,0 @@
-openai
-
-## python utils
-pydantic
-python-dotenv
-
-## jupyter notebook
-ipykernel

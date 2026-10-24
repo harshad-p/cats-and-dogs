@@ -1,13 +1,6 @@
-.ipynb_checkpoints/
-.env*
-venv/
+output.md
+.env
 .venv/
-.directory
+.pytest_cache/
 __pycache__/
-*.pyc
-tmp/
-*.out*
-.virtual_documents/
 .DS_Store
-agents/langchain/customer_support_resolution_agent/kb_index/
-.gstack/

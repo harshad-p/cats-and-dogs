@@ -1,213 +1,85 @@
-# Nebius Token Factory Cookbook
+# Live Fact Checker
 
-<!-- <img src="images/banner-1.jpg"> -->
+A voice-first fact checker. Speak into the microphone, and the app transcribes what you say, pulls out factual claims, researches them, and shows a verdict with evidence and sources.
 
-A collection of guides and examples for building intelligent applications with open models on [Nebius Token Factory](https://tokenfactory.nebius.com/).
+Each claim card shows the original sentence next to the extracted claim. The top bar counts verdicts as checks finish. **Download report** saves a PDF of the current session.
 
-> ⭐ If you find this repo useful, give it a star! You'll be notified of new updates and help others discover it too — thank you!
+## How it works
 
----
+| Step | What runs |
+|---|---|
+| Speech-to-text | OpenAI `gpt-4o-transcribe`, Groq Whisper, or browser speech recognition, selected by configuration. |
+| Claim extraction and verdicts | Nemotron via Nebius Token Factory, or OpenAI, selected by configuration. |
+| Web research | MiniMax-M3 via Nebius, or OpenAI, through the deepagents framework. |
+| Sources | Tavily search. Article titles and URLs come from the search results. |
 
-## Table of Contents
+Verdicts are **Supported**, **Contradicted**, **Misleading**, or **Insufficient evidence**. Checks that are still running show as pending. Failed checks stay separate and are not treated as finished verdicts.
 
-- [Nebius Token Factory Cookbook](#nebius-token-factory-cookbook)
-  - [👉 Start Here](#-start-here)
-  - [😎 Featured](#-featured)
-  - [👷 For Builders](#-for-builders)
-  - [🎁 Models](#-models)
-  - [📘 APIs](#-apis)
-  - [🧪 Evaluations](#-evaluations)
-  - [🎠 Agents](#-agents)
-  - [🔍 RAG](#-rag)
-  - [⛓️ Integrations](#️-integrations)
-  - [🔧 Function / Tool Calling](#-function--tool-calling)
-  - [🛠️ Post Training](#️-post-training)
-  - [🫗 Distillation](#-distillation)
-  - [🏫 Workshops](#-workshops)
-  - [🕶️ Fun and Cool Stuff](#️-fun-and-cool-stuff)
-  - [🤝 Contributing](#-contributing)
-  - [📔 Resources](#-resources)
-  - [📜 License](#-license)
-  - [🌟 GitHub Star History](#-github-star-history)
-  - [✨ Contributors](#-contributors)
+## Requirements
 
----
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+- A browser with microphone access. Chrome or Edge is required only for browser speech recognition.
+- A [Nebius Token Factory](https://tokenfactory.nebius.com/) API key, or an OpenAI API key
+- A [Tavily](https://tavily.com/) API key
+- Optional: a [Groq](https://console.groq.com/) API key for server-side transcription
 
-## 👉 Start Here
+## Setup
 
-New to Nebius Token Factory? Start with the [Quick tour of Token Factory](start-here/README.md), then follow the [setup guide](start-here/setup.md) to get your API key and development environment ready.
+From the repository root:
 
----
+```bash
+cp env.example .env
+```
 
-## 😎 Featured
+Edit `.env`:
 
-- [Token Factory Workshop](workshops/token-factory-workshop/README.md)
-- [Office Hours](office-hours/README.md) &nbsp;•&nbsp; [Events](community/events.md) supported by Nebius AI
-- [LangChain deep agent examples](agents/langchain/README.md)
-- [Community contributions](community/README.md)
-- [Post training examples](post-training/)
-- [Distillation guide](distillation/distillation-1/)
-- [Cool Apps / Demos](apps/README.md)
+```env
+TAVILY_API_KEY=your-tavily-api-key
 
----
+# Default: Nebius for LLM work; OpenAI, Groq, or browser for speech-to-text.
+AI_PROVIDER=nebius
+NEBIUS_API_KEY=your-nebius-api-key
 
+# Optional: use OpenAI for claim extraction, verdicts, research, and STT.
+# AI_PROVIDER=openai
+# OPENAI_API_KEY=your-openai-api-key
+# STT_PROVIDER=openai
 
-## 👷 [For Builders](community/events.md)
+# Optional: use Groq Whisper for STT.
+# GROQ_API_KEY=your-groq-api-key
+# STT_PROVIDER=groq
+```
 
-Network, learn, and build with fellow builders - including hackathons, workshops, and community events.
+Install dependencies:
 
-Join [Office Hour](office-hours/README.md) online.
+```bash
+uv sync
+```
 
-[Events / hackathons / workshops](community/events.md)
+API keys stay on the server. Do not commit `.env`.
 
----
+`STT_PROVIDER=auto` is the default: it chooses OpenAI when `OPENAI_API_KEY` is
+set, then Groq, then browser speech. The extractor admits only public,
+verifiable factual claims; greetings, preferences, plans, questions, and casual
+conversation are ignored before research begins.
 
-## 🎁 [Models](models/)
+## Run
 
-Checkout the latest [model guides and sample code](models/README.md).
+```bash
+uv run python app.py
+```
 
-**Featuring:** [Kimi-K3](models/kimi-k3.md) &nbsp;•&nbsp; [DeepSeek V4 Pro](models/deepseek-v4.md) &nbsp;•&nbsp; [GLM-5.2](models/glm-5.2.md) &nbsp;•&nbsp; [Qwen3.5-397B-A17B](models/qwen-3.5.md) &nbsp;•&nbsp; [Nemotron family](models/nemotron/README.md)
+Open http://localhost:5050, click **Start**, and speak a factual claim. Use **Reset** to clear the session.
 
----
+To use another port:
 
-## 📘 [APIs](api/)
+```bash
+PORT=8080 uv run python app.py
+```
 
-Access Token Factory using various APIs:
+## Tests
 
-[OpenAI-compatible API](api/api_native.ipynb)
-&nbsp; • &nbsp; [LiteLLM](api/api_litellm.ipynb)
-&nbsp; • &nbsp; [ai-suite](api/api_aisuite.ipynb)
-&nbsp; • &nbsp; [Llama-index](api/api_llamaindex.ipynb)
-
----
-
-## 🧪 Evaluations
-
-- [Inspect AI smoke evaluation](evaluations/inspect-ai/README.md) — run a small, reproducible evaluation through Token Factory's OpenAI-compatible endpoint
-
----
-
-## 🎠 [Agents](agents/)
-
-Numerous agent examples ranging from [starter](agents/README.md#-starter-agents) to [intermediate](agents/README.md#intermediate-agents) and [advanced](agents/README.md#advanced-agents).
-
-**Featured AI Agent frameworks:**
-
-[<img src="images/crewai-icon.svg" width="20" height="20"> CrewAI](agents/README.md#crewai)
-&nbsp; • &nbsp; [<img src="images/agno-icon.png" width="20" height="20"> Agno](agents/README.md#agno)
-&nbsp; • &nbsp; [<img src="images/langchain-icon.svg" width="20" height="20"> LangChain](agents/README.md#langchain)
-&nbsp; • &nbsp; [<img src="images/google-adk-icon.png" width="20" height="20"> Google ADK](agents/README.md#google-adk-agent-development-kit)
-&nbsp; • &nbsp; [<img src="images/llama-index-icon.jpeg" width="20" height="20"> Llama-index](agents/README.md#llama-index)
-&nbsp; • &nbsp; [<img src="images/pydantic-icon.png" width="20" height="20"> Pydantic](agents/README.md#pydantic-ai)
-&nbsp; • &nbsp; [<img src="images/aws-strands-agent-icon.png" width="20" height="20"> AWS Strands](agents/README.md#strands-agent)
-
----
-
-## 🔍 [RAG](rag/)
-
-| Example | Description | Tech Stack |
-|---------|-------------|------------|
-| [PDF RAG](rag/rag-pdf-llama-index/) | Simple PDF RAG application | LlamaIndex + Nebius AI |
-| [Chat with Documents](rag/chat-with-pdf) | Web app to chat interactively with PDF documents | LlamaIndex + Nebius AI + Streamlit |
-| [Internal Content Generation Platform](rag/content-gen-pipeline-qdrant/) | Create social posts, articles, and demos with a RAG pipeline | Qdrant + Nebius AI + Qwen3-Embedding |
-| [End-to-end RAG Pipeline for PDFs](rag/rag-milvus-1/) | Process and query PDF documents using vector DB and open-source embeddings | LlamaIndex + Milvus + Nebius AI + Qwen3-Embedding + GPT-OSS |
-| [Internal Support Agent](rag/support-agent-weaviate/) | Multi-agent support agent with web search, document RAG, Notion/Calendly tools, and Slack bot | Nebius AI + LangGraph + Weaviate |
-
-
----
-
-## ⛓️ [Integrations](integrations/README.md)
-
-Guides for connecting third-party tools to Token Factory:
-
-- [OpenClaw](integrations/openclaw/README.md) — self-hosted AI agents on open models
-- [Tavily](integrations/tavily/README.md) — LLM-optimized search API for agentic research
-- [Pixeltable](integrations/pixeltable/README.md) — multimodal AI data infrastructure with native Token Factory chat + embeddings
-- [OpenEnv prompt optimization](integrations/openenv/prompt-optimization/README.md) — build an OpenEnv agent environment and optimize an agent's prompt against its reward with open models
-
-See also the official catalog: [docs.tokenfactory.nebius.com/integrations](https://docs.tokenfactory.nebius.com/integrations/overview)
-
----
-
-## 🔧 [Function / Tool Calling](tool-calling/)
-
-| Example | Description | Tech Stack |
-|---------|-------------|------------|
-| [Simple function calling](tool-calling/function_calling_1.ipynb) | Demonstrates how to call functions | Nebius AI |
-
----
-
-## 🛠️ [Post Training](post-training/)
-
-Post-training lets you customize and improve pre-trained language models for your specific use cases through fine-tuning and other optimization methods.
-
-[View post training examples →](post-training/)
-
----
-
-## 🫗 [Distillation](distillation/)
-
-| Name | Description | Tech Stack |
-|------|-------------|------------|
-| [Distillation 1](distillation/distillation-1/) | Example of a distilled model for grammar checking | Nebius AI |
-
-
----
-
-## 🏫 [Workshops](workshops/)
-
-Hands-on, guided learning sessions:
-
-- [Token Factory Workshop](workshops/token-factory-workshop/README.md)
-- [Deep Research + Writing Agents Workshop with Nebius and Okahu](workshops/deep-research-writing-agents-nebius-okahu/README.md)
-
----
-
-## 🕶️ [Fun and Cool Stuff](fun/)
-
-Have some fun with models:
-
-- [Creating cool images using LORA adapters](lora/lora-1/README.md)
-- [Try the "Pelican Riding a Bicycle" benchmark](fun/pelican-riding-bicycle/)
-- [Real-time webcam commentary with vision models](fun/nebius-realtime-webcam/)
-
----
-
-## 🤝 [Contributing](community/README.md)
-
-We welcome your contributions! Open issues, submit pull requests, and share your experience.
-
-🧑🏻‍🤝‍🧑🏼 **[View community contributions](community/README.md)**
-
----
-
-## 📔 Resources
-
-- [Nebius Token Factory Docs](https://docs.tokenfactory.nebius.com/)
-- [Nebius AI Blog](https://nebius.com/blog)
-
----
-
-## 📜 License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----
-
-## 🌟 GitHub Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=nebius/token-factory-cookbook&type=Date)](https://www.star-history.com/#nebius/token-factory-cookbook&Date)
-
----
-
-## ✨ Contributors
-
-Thanks to all of our amazing contributors!
-
-<a href="https://github.com/nebius/token-factory-cookbook/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=nebius/token-factory-cookbook" />
-</a>
-
----
-
-© Nebius BV, 2025
+```bash
+uv run python -m unittest test_verdict_parsing.py
+```
