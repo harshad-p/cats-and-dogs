@@ -211,6 +211,74 @@ def _update_claim(claim_id: str, **kwargs) -> None:
     _push_sse(claim_id, "update", {"claim_id": claim_id, **kwargs})
 
 
+def _normalise_check_context(raw: object) -> dict[str, str]:
+    """Validate optional user context used only to disambiguate a claim.
+
+    Context is never treated as evidence.  Keeping it structured makes the
+    evaluation date, jurisdiction, and speaker visible to both the model and
+    the reader of a report.
+    """
+    if not isinstance(raw, dict):
+        return {}
+
+    context: dict[str, str] = {}
+    reference_date = str(raw.get("reference_date") or "").strip()
+    if reference_date:
+        try:
+            datetime.strptime(reference_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("Evaluate-as-of date must use YYYY-MM-DD.") from exc
+        context["reference_date"] = reference_date
+
+    for field, limit in (("location", 160), ("speaker", 160), ("notes", 1000)):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            context[field] = value[:limit]
+    return context
+
+
+def _context_summary(context: dict[str, str] | None) -> str:
+    """Return a readable, non-evidentiary description of a context snapshot."""
+    context = context or {}
+    labels = (
+        ("reference_date", "Evaluate as of"),
+        ("location", "Location"),
+        ("speaker", "Speaker"),
+        ("notes", "Additional context"),
+    )
+    return "\n".join(
+        f"{label}: {context[key]}" for key, label in labels if context.get(key)
+    )
+
+
+def _speaker_identity_conflict(
+    claim_text: str, check_context: dict[str, str] | None
+) -> tuple[str, str] | None:
+    """Detect a first-person name that conflicts with the supplied speaker name.
+
+    This is a consistency check against session context, not an external fact
+    check. It deliberately handles only the unambiguous phrase "my name is …".
+    """
+    speaker = (check_context or {}).get("speaker", "").strip()
+    if not speaker:
+        return None
+
+    claimed_match = re.search(r"\bmy\s+name\s+is\s+([^.,;!?]+)", claim_text, re.IGNORECASE)
+    if not claimed_match:
+        return None
+    claimed = re.split(r"\s+(?:and|but|or|as)\b", claimed_match.group(1), maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    speaker_name = re.split(r"\s+(?:is|at|from)\b|[,(/]", speaker, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if not claimed or not speaker_name:
+        return None
+
+    normalise = lambda value: re.sub(r"[^\w]+", "", value.casefold())
+    claimed_key = normalise(claimed)
+    speaker_key = normalise(speaker_name)
+    if claimed_key and speaker_key and claimed_key not in speaker_key and speaker_key not in claimed_key:
+        return claimed, speaker_name
+    return None
+
+
 # ── Nemotron: claim extraction ────────────────────────────────────────────────
 
 def extract_claims_nemotron(transcript: str) -> list[dict]:
@@ -594,7 +662,9 @@ def _present_source(source: dict) -> dict:
 
 # ── Nemotron: structured verdict from research text ───────────────────────────
 
-def structured_verdict_nemotron(claim_text: str, research_text: str) -> dict:
+def structured_verdict_nemotron(
+    claim_text: str, research_text: str, check_context: dict[str, str] | None = None
+) -> dict:
     """Use Nemotron to parse the MiniMax research report into a structured verdict.
 
     Failure modes handled:
@@ -614,6 +684,9 @@ def structured_verdict_nemotron(claim_text: str, research_text: str) -> dict:
                     "You are a fact-checking analyst. "
                     "Given a claim and a research report, extract a structured verdict. "
                     "Only use evidence explicitly mentioned in the report. Do NOT fabricate sources. "
+                    "Use supplied check context only to interpret dates, location, or references; "
+                    "it is not evidence. For time-sensitive claims, preserve the evaluation date "
+                    "used by the research rather than substituting current facts. "
                     "Copy source URLs exactly. Do not invent an article URL, and do not "
                     "replace an article URL with the publisher homepage."
                 ),
@@ -622,6 +695,7 @@ def structured_verdict_nemotron(claim_text: str, research_text: str) -> dict:
                 "role": "user",
                 "content": (
                     f"CLAIM: {claim_text}\n\n"
+                    f"CHECK CONTEXT (not evidence):\n{_context_summary(check_context) or 'None'}\n\n"
                     f"RESEARCH REPORT:\n{research_text}"
                 ),
             },
@@ -687,11 +761,32 @@ FACT_CHECK_SYSTEM_PROMPT = (
 )
 
 
-def research_claim(claim_id: str, claim_text: str) -> None:
+def research_claim(
+    claim_id: str, claim_text: str, check_context: dict[str, str] | None = None
+) -> None:
     """Run deep agent research in a background thread, push SSE updates."""
     _update_claim(claim_id, status="researching")
 
     try:
+        identity_conflict = _speaker_identity_conflict(claim_text, check_context)
+        if identity_conflict:
+            claimed, speaker = identity_conflict
+            _update_claim(
+                claim_id,
+                status="done",
+                verdict="CONTRADICTED",
+                one_liner="Conflicts with supplied speaker context",
+                explanation=(
+                    f"The statement identifies the speaker as {claimed}, but the session "
+                    f"context identifies the speaker as {speaker}. This verdict checks "
+                    "consistency with the supplied context; it does not independently verify "
+                    "the speaker's identity."
+                ),
+                confidence=1.0,
+                sources=[],
+            )
+            return
+
         tavily_search = TavilySearch(max_results=5, search_depth="advanced")
         if AI_PROVIDER == "openai":
             from langchain_openai import ChatOpenAI
@@ -704,11 +799,16 @@ def research_claim(claim_id: str, claim_text: str) -> None:
             system_prompt=FACT_CHECK_SYSTEM_PROMPT,
         )
 
+        context_text = _context_summary(check_context)
         question = (
             f"Verify this claim: '{claim_text}' "
             "Find reliable sources, determine whether the evidence supports "
             "or contradicts the claim, and cite the sources. "
-            "If the evidence is insufficient, say so."
+            "If the evidence is insufficient, say so. "
+            "If the claim names a date, evaluate it at that date. Otherwise, use the "
+            "evaluate-as-of date in the context when present; use current facts only when "
+            "no date is supplied. Context disambiguates the claim but is not evidence.\n\n"
+            f"CHECK CONTEXT (not evidence):\n{context_text or 'None'}"
         )
 
         result = agent.invoke({"messages": [{"role": "user", "content": question}]})
@@ -727,7 +827,7 @@ def research_claim(claim_id: str, claim_text: str) -> None:
         _update_claim(claim_id, status="analyzing", research=research_text)
 
         # Nemotron converts the free-text research into a structured verdict
-        vd = structured_verdict_nemotron(claim_text, research_text)
+        vd = structured_verdict_nemotron(claim_text, research_text, check_context)
 
         # Merge sources: prefer Tavily article URLs (verbatim) over LLM-parsed
         # URLs.  Nemotron's sources (from tool call path) may have supports_claim
@@ -1073,6 +1173,10 @@ def _build_pdf(claims_snapshot: list[dict]) -> bytes:
         ))
         block.append(Paragraph("Extracted claim", sMuted))
         block.append(Paragraph(_pdf_text(claim_text) or "—", sClaimText))
+        context_text = _context_summary(c.get("check_context"))
+        if context_text:
+            block.append(Paragraph("Fact-check context", sMuted))
+            block.append(Paragraph(_pdf_text(context_text), sBodyText))
 
         if status in ("queued", "researching", "analyzing"):
             block.append(Paragraph(
@@ -1153,6 +1257,10 @@ def api_transcript():
     transcript = (body.get("text") or "").strip()
     if not transcript:
         return jsonify({"error": "empty transcript"}), 400
+    try:
+        check_context = _normalise_check_context(body.get("context"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     # Nemotron extracts claims
     extracted = filter_verifiable_claims(extract_claims_nemotron(transcript))
@@ -1177,6 +1285,7 @@ def api_transcript():
                 "id": cid,
                 "text": c["text"],
                 "sentence": transcript,
+                "check_context": check_context,
                 "status": "queued",
                 "verdict": None,
                 "one_liner": None,
@@ -1190,7 +1299,11 @@ def api_transcript():
 
     # Fire background research for each new claim
     for cid in new_claims:
-        t = threading.Thread(target=research_claim, args=(cid, claims[cid]["text"]), daemon=True)
+        t = threading.Thread(
+            target=research_claim,
+            args=(cid, claims[cid]["text"], claims[cid]["check_context"]),
+            daemon=True,
+        )
         t.start()
 
     return jsonify({

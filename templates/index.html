@@ -317,6 +317,11 @@ button:disabled { opacity: .4; cursor: default; }
   font-size: 11px; color: var(--muted);
   margin-left: 2px;
 }
+#btn-context {
+  background: var(--surface2); color: var(--text2);
+  border: 1px solid var(--border); white-space: nowrap;
+}
+#btn-context.has-context { border-color: #bdd5f8; color: var(--accent); background: #e8f1ff; }
 .rec-dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--red); flex-shrink: 0;
@@ -346,6 +351,38 @@ button:disabled { opacity: .4; cursor: default; }
 }
 #toast.show { opacity: 1; }
 
+/* ── Fact-check context ───────────────────────────────────────────────────── */
+.c-context {
+  margin: 7px 0 8px; padding: 6px 8px;
+  border-left: 2px solid var(--accent); background: #f4f8ff;
+  color: var(--text2); font-size: 11px; line-height: 1.5;
+}
+.c-context strong { color: var(--text); }
+#context-modal[hidden] { display: none; }
+#context-modal {
+  position: fixed; inset: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(24, 34, 48, .35);
+}
+.context-dialog {
+  width: min(520px, 100%); background: var(--surface); border: 1px solid var(--border2);
+  border-radius: 12px; box-shadow: 0 16px 48px rgba(24, 34, 48, .2); padding: 20px;
+}
+.context-dialog h2 { font-size: 16px; margin-bottom: 4px; }
+.context-dialog p { font-size: 12px; color: var(--text2); margin-bottom: 14px; }
+.context-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.context-field { display: flex; flex-direction: column; gap: 4px; }
+.context-field.full { grid-column: 1 / -1; }
+.context-field label { color: var(--text2); font-size: 11px; font-weight: 700; }
+.context-field input, .context-field textarea {
+  width: 100%; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px; padding: 7px 8px;
+}
+.context-field textarea { min-height: 76px; resize: vertical; }
+.context-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+#btn-context-clear { background: transparent; color: var(--text2); border: 1px solid var(--border); }
+#btn-context-save { background: var(--accent); color: white; }
+
 /* ── Responsive ─────────────────────────────────────────────────────────────── */
 @media (max-width: 1100px) {
   #header-sub { display: none; }
@@ -357,6 +394,8 @@ button:disabled { opacity: .4; cursor: default; }
   #header { padding: 4px 12px; grid-template-rows: 38px 60px; }
   .vs-pill { min-width: 122px; height: 46px; }
   .vs-n { font-size: 18px; }
+  .context-fields { grid-template-columns: 1fr; }
+  .context-field.full { grid-column: auto; }
 }
 </style>
 </head>
@@ -415,6 +454,7 @@ button:disabled { opacity: .4; cursor: default; }
       <span id="btn-mic-label">Start</span>
     </button>
     <button id="btn-reset-sess">Reset</button>
+    <button id="btn-context" type="button">Check context</button>
     <select id="lang-select">
       <option value="en">English</option>
       <option value="de">Deutsch</option>
@@ -425,6 +465,35 @@ button:disabled { opacity: .4; cursor: default; }
   </div>
   <div id="transcript-area">
     <span class="placeholder">Transcript will appear here…</span>
+  </div>
+</div>
+
+<div id="context-modal" hidden role="dialog" aria-modal="true" aria-labelledby="context-title">
+  <div class="context-dialog">
+    <h2 id="context-title">Fact-check context</h2>
+    <p>Used only to resolve time, place, or references. It is not treated as evidence.</p>
+    <div class="context-fields">
+      <div class="context-field">
+        <label for="context-date">Evaluate as of</label>
+        <input id="context-date" type="date" />
+      </div>
+      <div class="context-field">
+        <label for="context-location">Location / jurisdiction</label>
+        <input id="context-location" maxlength="160" placeholder="e.g. Berlin, Germany" />
+      </div>
+      <div class="context-field full">
+        <label for="context-speaker">Speaker name</label>
+        <input id="context-speaker" maxlength="160" placeholder="e.g. Harshad" />
+      </div>
+      <div class="context-field full">
+        <label for="context-notes">Additional context</label>
+        <textarea id="context-notes" maxlength="1000" placeholder="Optional background or terms that need disambiguation"></textarea>
+      </div>
+    </div>
+    <div class="context-actions">
+      <button id="btn-context-clear" type="button">Clear optional fields</button>
+      <button id="btn-context-save" type="button">Use this context</button>
+    </div>
   </div>
 </div>
 
@@ -451,6 +520,7 @@ const S = {
   submitTimer: null,
   groqRecorder: null,
   groqSessionId: 0,
+  checkContext: { reference_date: new Date().toISOString().slice(0, 10) },
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -463,11 +533,19 @@ const $txArea       = document.getElementById('transcript-area');
 const $btnMic       = document.getElementById('btn-mic');
 const $btnMicLabel  = document.getElementById('btn-mic-label');
 const $btnReset     = document.getElementById('btn-reset-sess');
+const $btnContext   = document.getElementById('btn-context');
 const $btnReport    = document.getElementById('btn-report');
 const $langSelect   = document.getElementById('lang-select');
 const $sttStatus    = document.getElementById('stt-status');
 const $toast        = document.getElementById('toast');
 const $headerSub     = document.getElementById('header-sub');
+const $contextModal = document.getElementById('context-modal');
+const $contextDate = document.getElementById('context-date');
+const $contextLocation = document.getElementById('context-location');
+const $contextSpeaker = document.getElementById('context-speaker');
+const $contextNotes = document.getElementById('context-notes');
+const $btnContextClear = document.getElementById('btn-context-clear');
+const $btnContextSave = document.getElementById('btn-context-save');
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Utilities
@@ -496,6 +574,47 @@ function showError(msg) {
   $errorBanner.textContent = msg;
   $errorBanner.style.display = 'block';
   setTimeout(() => { $errorBanner.style.display = 'none'; }, 8000);
+}
+
+function contextHasOptionalFields(context) {
+  return Boolean(context.location || context.speaker || context.notes);
+}
+
+function updateContextButton() {
+  $btnContext.classList.toggle('has-context', contextHasOptionalFields(S.checkContext));
+  $btnContext.textContent = contextHasOptionalFields(S.checkContext)
+    ? 'Context set'
+    : 'Check context';
+}
+
+function openContextModal() {
+  $contextDate.value = S.checkContext.reference_date || '';
+  $contextLocation.value = S.checkContext.location || '';
+  $contextSpeaker.value = S.checkContext.speaker || '';
+  $contextNotes.value = S.checkContext.notes || '';
+  $contextModal.hidden = false;
+  $contextDate.focus();
+}
+
+function saveContext() {
+  S.checkContext = {
+    reference_date: $contextDate.value || new Date().toISOString().slice(0, 10),
+    location: $contextLocation.value.trim(),
+    speaker: $contextSpeaker.value.trim(),
+    notes: $contextNotes.value.trim(),
+  };
+  updateContextButton();
+  $contextModal.hidden = true;
+}
+
+function contextHtml(context) {
+  if (!context) return '';
+  const parts = [];
+  if (context.reference_date) parts.push('<strong>As of:</strong> ' + esc(context.reference_date));
+  if (context.location) parts.push('<strong>Location:</strong> ' + esc(context.location));
+  if (context.speaker) parts.push('<strong>Speaker:</strong> ' + esc(context.speaker));
+  if (context.notes) parts.push('<strong>Context:</strong> ' + esc(context.notes));
+  return parts.length ? '<div class="c-context">' + parts.join(' · ') + '</div>' : '';
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -684,6 +803,7 @@ function renderClaimBlock(claimId) {
 
   const oneLiner    = c.one_liner   ? '<div class="c-one-liner">'  + esc(c.one_liner)   + '</div>' : '';
   const explanation = c.explanation ? '<div class="c-explanation">' + esc(c.explanation) + '</div>' : '';
+  const checkContext = contextHtml(c.check_context);
 
   el.innerHTML =
     '<div class="c-block-header">' +
@@ -691,7 +811,7 @@ function renderClaimBlock(claimId) {
       '<span class="c-claim-text">' + esc(c.text) + '</span>' +
       '<span class="badge ' + badgeClass_ + '">' + badgeLabel_ + '</span>' +
     '</div>' +
-    oneLiner + explanation + confBar + sourcesHtml + progressHtml;
+    checkContext + oneLiner + explanation + confBar + sourcesHtml + progressHtml;
 }
 
 function verdictLabel(v) {
@@ -724,7 +844,7 @@ function submitSentence(sentenceId, sentenceText) {
   fetch('/api/transcript', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: sentenceText }),
+    body: JSON.stringify({ text: sentenceText, context: S.checkContext }),
   })
   .then(r => r.json())
   .then(data => {
@@ -752,6 +872,7 @@ function submitSentence(sentenceId, sentenceText) {
           verdict: null, one_liner: null,
           explanation: null, confidence: null,
           sources: [], research: null, corrects: c.corrects || null,
+          check_context: S.checkContext,
         };
         S.sentenceMap[sentenceId].claimIds.push(cid);
       }
@@ -1023,6 +1144,23 @@ $btnMic.addEventListener('click', () => {
   catch (e) { showError('Could not start microphone: ' + e.message); }
 });
 
+$btnContext.addEventListener('click', openContextModal);
+$btnContextSave.addEventListener('click', () => {
+  saveContext();
+  toast('Fact-check context will apply to new claims');
+});
+$btnContextClear.addEventListener('click', () => {
+  $contextLocation.value = '';
+  $contextSpeaker.value = '';
+  $contextNotes.value = '';
+});
+$contextModal.addEventListener('click', e => {
+  if (e.target === $contextModal) $contextModal.hidden = true;
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$contextModal.hidden) $contextModal.hidden = true;
+});
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Feature 3 — Download report
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -1079,6 +1217,8 @@ $btnReset.addEventListener('click', async () => {
   S.claimToSentence = {};
   S.transcript = '';
   S.interim = '';
+  S.checkContext = { reference_date: new Date().toISOString().slice(0, 10) };
+  updateContextButton();
   submittedSentences.clear();
 
   renderTranscript();
@@ -1117,6 +1257,7 @@ function setStatusText(text) { $sttStatus.textContent = text; }
     }
   }
 
+  updateContextButton();
   await loadExistingClaims();
 })();
 </script>

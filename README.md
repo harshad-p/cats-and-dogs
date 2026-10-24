@@ -72,6 +72,11 @@ uv run python app.py
 
 Open http://localhost:5050, click **Start**, and speak a factual claim. Use **Reset** to clear the session.
 
+Use **Check context** before speaking when the interpretation depends on time,
+place, or speaker. An explicit date in the claim takes priority; otherwise the
+selected “evaluate as of” date is used for time-sensitive claims. Context helps
+disambiguate the request, but is never treated as evidence.
+
 To use another port:
 
 ```bash

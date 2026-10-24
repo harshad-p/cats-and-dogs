@@ -97,6 +97,9 @@ _verdict_counts                = _app._verdict_counts
 _build_pdf                     = _app._build_pdf
 structured_verdict_nemotron    = _app.structured_verdict_nemotron
 filter_verifiable_claims       = _app.filter_verifiable_claims
+_normalise_check_context       = _app._normalise_check_context
+_context_summary               = _app._context_summary
+_speaker_identity_conflict     = _app._speaker_identity_conflict
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -220,6 +223,34 @@ class TestVerifiableClaimFilter(unittest.TestCase):
         ]
         filtered = filter_verifiable_claims(claims)
         self.assertEqual(filtered, [{"id": "fact", "text": "Paris is the capital of France."}])
+
+
+class TestCheckContext(unittest.TestCase):
+    def test_normalises_and_limits_context(self):
+        context = _normalise_check_context({
+            "reference_date": "2020-11-03",
+            "location": "United States",
+            "speaker": "Campaign spokesperson",
+            "notes": "Election-night statement.",
+        })
+        self.assertEqual(context["reference_date"], "2020-11-03")
+        self.assertIn("Evaluate as of: 2020-11-03", _context_summary(context))
+        self.assertIn("Location: United States", _context_summary(context))
+
+    def test_rejects_invalid_reference_date(self):
+        with self.assertRaises(ValueError):
+            _normalise_check_context({"reference_date": "03-11-2020"})
+
+    def test_detects_conflicting_first_person_name(self):
+        conflict = _speaker_identity_conflict(
+            "My name is Boris and I sell cars.", {"speaker": "Harshad"}
+        )
+        self.assertEqual(conflict, ("Boris", "Harshad"))
+
+    def test_does_not_flag_matching_first_person_name(self):
+        self.assertIsNone(_speaker_identity_conflict(
+            "My name is Harshad.", {"speaker": "Harshad"}
+        ))
 
 
 class TestParseXmlToolContent(unittest.TestCase):
@@ -542,6 +573,10 @@ class TestBuildPdf(unittest.TestCase):
                     "supports_claim": True,
                 }] if i % 2 == 0 else [],
             })
+        claims[0]["check_context"] = {
+            "reference_date": "2020-11-03",
+            "location": "United States",
+        }
         claims.append({
             "text": "Still checking this.",
             "sentence": "I think this might be true.",
@@ -589,6 +624,8 @@ class TestBuildPdf(unittest.TestCase):
         self.assertIn("Spoken sentence", blob)
         self.assertIn("The speaker said sentence 0.", blob)
         self.assertIn("Extracted claim 0", blob)
+        self.assertIn("Fact-check context", blob)
+        self.assertIn("Evaluate as of: 2020-11-03", blob)
         self.assertIn("Research in progress", blob)
         self.assertIn("Research failed", blob)
         self.assertIn("No sources were returned", blob)
