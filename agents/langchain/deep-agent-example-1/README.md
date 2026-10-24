@@ -8,9 +8,9 @@ Each claim card shows the original sentence next to the extracted claim. The top
 
 | Step | What runs |
 |---|---|
-| Speech-to-text | Groq Whisper (`whisper-large-v3`) when `GROQ_API_KEY` is set. Otherwise the browser Web Speech API (Chrome or Edge). |
-| Claim extraction and verdicts | NVIDIA Nemotron (`nvidia/Nemotron-3_5-Lightning`) via Nebius Token Factory |
-| Web research | MiniMax-M3 (`MiniMaxAI/MiniMax-M3`) via Nebius Token Factory and the deepagents framework |
+| Speech-to-text | OpenAI `gpt-4o-transcribe`, Groq Whisper, or browser speech recognition, selected by configuration. |
+| Claim extraction and verdicts | Nemotron via Nebius Token Factory, or OpenAI, selected by configuration. |
+| Web research | MiniMax-M3 via Nebius, or OpenAI, through the deepagents framework. |
 | Sources | Tavily search. Article titles and URLs come from the search results. |
 
 Verdicts are **Supported**, **Contradicted**, **Misleading**, or **Insufficient evidence**. Checks that are still running show as pending. Failed checks stay separate and are not treated as finished verdicts.
@@ -19,8 +19,8 @@ Verdicts are **Supported**, **Contradicted**, **Misleading**, or **Insufficient 
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
-- A browser with microphone access. Chrome or Edge is required only if you are not using Groq.
-- A [Nebius Token Factory](https://tokenfactory.nebius.com/) API key
+- A browser with microphone access. Chrome or Edge is required only for browser speech recognition.
+- A [Nebius Token Factory](https://tokenfactory.nebius.com/) API key, or an OpenAI API key
 - A [Tavily](https://tavily.com/) API key
 - Optional: a [Groq](https://console.groq.com/) API key for server-side transcription
 
@@ -36,11 +36,20 @@ cp env.example .env
 Edit `.env`:
 
 ```env
-NEBIUS_API_KEY=your-nebius-api-key
 TAVILY_API_KEY=your-tavily-api-key
 
-# Optional. Enables Groq Whisper instead of the browser speech API.
-GROQ_API_KEY=your-groq-api-key
+# Default: Nebius for LLM work; OpenAI, Groq, or browser for speech-to-text.
+AI_PROVIDER=nebius
+NEBIUS_API_KEY=your-nebius-api-key
+
+# Optional: use OpenAI for claim extraction, verdicts, research, and STT.
+# AI_PROVIDER=openai
+# OPENAI_API_KEY=your-openai-api-key
+# STT_PROVIDER=openai
+
+# Optional: use Groq Whisper for STT.
+# GROQ_API_KEY=your-groq-api-key
+# STT_PROVIDER=groq
 ```
 
 Install dependencies:
@@ -50,6 +59,11 @@ uv sync
 ```
 
 API keys stay on the server. Do not commit `.env`.
+
+`STT_PROVIDER=auto` is the default: it chooses OpenAI when `OPENAI_API_KEY` is
+set, then Groq, then browser speech. The extractor admits only public,
+verifiable factual claims; greetings, preferences, plans, questions, and casual
+conversation are ignored before research begins.
 
 ## Run
 

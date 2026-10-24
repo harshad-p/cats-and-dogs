@@ -12,9 +12,12 @@ Browser (Web Speech API / Groq Whisper)
 
 Environment
 -----------
-NEBIUS_API_KEY   required — Nebius Token Factory
+AI_PROVIDER      optional — nebius (default) or openai
+NEBIUS_API_KEY   required when AI_PROVIDER=nebius
+OPENAI_API_KEY   required when AI_PROVIDER=openai; optional for OpenAI STT
 TAVILY_API_KEY   required — Tavily web search
-GROQ_API_KEY     optional — enables server-side Whisper via Groq (fast cloud STT)
+STT_PROVIDER     optional — auto (default), openai, groq, or browser
+GROQ_API_KEY     required only when STT_PROVIDER=groq
 """
 
 import ast
@@ -60,14 +63,32 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ── API clients ─────────────────────────────────────────────────────────────
-NEBIUS_API_KEY = os.environ["NEBIUS_API_KEY"]
-TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # optional
+AI_PROVIDER = os.getenv("AI_PROVIDER", "nebius").lower()
+if AI_PROVIDER not in {"nebius", "openai"}:
+    raise RuntimeError("AI_PROVIDER must be either 'nebius' or 'openai'.")
 
-nebius_client = openai.OpenAI(
-    api_key=NEBIUS_API_KEY,
-    base_url="https://api.studio.nebius.ai/v1/",
-)
+NEBIUS_API_KEY = os.getenv("NEBIUS_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if AI_PROVIDER == "nebius":
+    if not NEBIUS_API_KEY:
+        raise RuntimeError("Set NEBIUS_API_KEY or choose AI_PROVIDER=openai.")
+    llm_client = openai.OpenAI(
+        api_key=NEBIUS_API_KEY,
+        base_url="https://api.studio.nebius.ai/v1/",
+    )
+    CLAIM_MODEL = os.getenv("NEBIUS_CLAIM_MODEL", "nvidia/Nemotron-3_5-Lightning")
+    RESEARCH_MODEL = os.getenv("NEBIUS_RESEARCH_MODEL", "MiniMaxAI/MiniMax-M3")
+else:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Set OPENAI_API_KEY when AI_PROVIDER=openai.")
+    llm_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    CLAIM_MODEL = os.getenv("OPENAI_CLAIM_MODEL", "gpt-4.1-mini")
+    RESEARCH_MODEL = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-4.1-mini")
+
+openai_stt_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # Optional Groq client for server-side Whisper STT
 groq_client = None
@@ -79,6 +100,20 @@ if GROQ_API_KEY:
     log.info("Groq STT enabled (Whisper-large-v3)")
 else:
     log.info("No GROQ_API_KEY — browser Web Speech API is the STT provider")
+
+STT_PROVIDER = os.getenv("STT_PROVIDER", "auto").lower()
+if STT_PROVIDER == "auto":
+    STT_PROVIDER = "openai" if openai_stt_client else ("groq" if groq_client else "browser")
+if STT_PROVIDER not in {"openai", "groq", "browser"}:
+    raise RuntimeError("STT_PROVIDER must be 'auto', 'openai', 'groq', or 'browser'.")
+if STT_PROVIDER == "openai" and not openai_stt_client:
+    raise RuntimeError("Set OPENAI_API_KEY to use STT_PROVIDER=openai.")
+if STT_PROVIDER == "groq" and not groq_client:
+    raise RuntimeError("Set GROQ_API_KEY to use STT_PROVIDER=groq.")
+STT_MODEL = os.getenv(
+    "OPENAI_STT_MODEL" if STT_PROVIDER == "openai" else "GROQ_STT_MODEL",
+    "gpt-4o-transcribe" if STT_PROVIDER == "openai" else "whisper-large-v3",
+)
 
 # ── Nemotron tool schemas ────────────────────────────────────────────────────
 EXTRACT_CLAIMS_TOOL = {
@@ -180,14 +215,23 @@ def _update_claim(claim_id: str, **kwargs) -> None:
 
 def extract_claims_nemotron(transcript: str) -> list[dict]:
     """Use Nemotron-3_5-Lightning to extract structured claims from transcript."""
-    resp = nebius_client.chat.completions.create(
-        model="nvidia/Nemotron-3_5-Lightning",
+    resp = llm_client.chat.completions.create(
+        model=CLAIM_MODEL,
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a precise claim extractor. "
-                    "Extract factual claims only. Ignore rhetorical questions and opinions."
+                    "You are a strict fact-checking gate. Extract only a concrete, "
+                    "externally verifiable factual assertion: a statement whose truth can "
+                    "be checked against credible public evidence. Return no claim for "
+                    "greetings, gratitude, preferences, wants, plans, private mental states, "
+                    "opinions, advice, commands, questions, hypotheticals, or casual chat. "
+                    "For example, 'Thank you' and 'I want to eat some food' produce no claims. "
+                    "Extract EVERY distinct factual assertion, including assertions embedded in "
+                    "reported speech and coordinated with 'and', 'but', or 'also'. Do not stop "
+                    "after two claims. For example, from 'My friend said mangoes are spicy, "
+                    "octopuses have ten hearts, and Trump won the 2020 election', return all "
+                    "three assertions as separate claims."
                 ),
             },
             {"role": "user", "content": transcript},
@@ -202,6 +246,33 @@ def extract_claims_nemotron(transcript: str) -> list[dict]:
         raw = json.loads(choice.message.tool_calls[0].function.arguments)
         return raw.get("claims", [])
     return []
+
+
+_NON_FACTUAL_OPENERS = re.compile(
+    r"^(?:thank(?:s|\s+you)?|hello|hi|hey|good\s+(?:morning|afternoon|evening)|"
+    r"please|sorry|i\s+(?:want|would\s+like|like|love|hate|feel|think|believe|hope|plan)|"
+    r"we\s+(?:should|need\s+to)|let['’]?s|can\s+you|could\s+you|would\s+you|"
+    r"(?:what|why|how|when|where)\b)",
+    re.IGNORECASE,
+)
+
+
+def filter_verifiable_claims(extracted: list[dict]) -> list[dict]:
+    """Reject conversational output even if the extractor accidentally returns it.
+
+    This is a conservative second gate, not a replacement for the model's semantic
+    decision. It prevents common speech-recognition chatter from starting an
+    expensive research job.
+    """
+    accepted: list[dict] = []
+    for claim in extracted:
+        text = str(claim.get("text") or "").strip()
+        if len(text.split()) < 3 or _NON_FACTUAL_OPENERS.match(text):
+            continue
+        normalized = dict(claim)
+        normalized["text"] = text
+        accepted.append(normalized)
+    return accepted
 
 
 # ── Verdict normalisation ─────────────────────────────────────────────────────
@@ -534,8 +605,8 @@ def structured_verdict_nemotron(claim_text: str, research_text: str) -> dict:
                       _extract_verdict_from_research() on the research text itself.
     4. Truly unknown → return INSUFFICIENT_EVIDENCE (never a fabricated verdict).
     """
-    resp = nebius_client.chat.completions.create(
-        model="nvidia/Nemotron-3_5-Lightning",
+    resp = llm_client.chat.completions.create(
+        model=CLAIM_MODEL,
         messages=[
             {
                 "role": "system",
@@ -622,7 +693,11 @@ def research_claim(claim_id: str, claim_text: str) -> None:
 
     try:
         tavily_search = TavilySearch(max_results=5, search_depth="advanced")
-        model = ChatNebius(model="MiniMaxAI/MiniMax-M3")
+        if AI_PROVIDER == "openai":
+            from langchain_openai import ChatOpenAI
+            model = ChatOpenAI(model=RESEARCH_MODEL, api_key=OPENAI_API_KEY)
+        else:
+            model = ChatNebius(model=RESEARCH_MODEL)
         agent = create_deep_agent(
             model=model,
             tools=[tavily_search],
@@ -1080,7 +1155,7 @@ def api_transcript():
         return jsonify({"error": "empty transcript"}), 400
 
     # Nemotron extracts claims
-    extracted = extract_claims_nemotron(transcript)
+    extracted = filter_verifiable_claims(extract_claims_nemotron(transcript))
     new_claims = []
 
     with claims_lock:
@@ -1176,12 +1251,12 @@ def api_check_stream(claim_id: str):
 
 @app.route("/api/stt", methods=["POST"])
 def api_stt():
-    """Optional server-side STT via Groq Whisper.
+    """Server-side STT via OpenAI or Groq.
     POST multipart/form-data with field 'audio' (webm/mp4/wav blob).
-    Falls back to 400 if GROQ_API_KEY is not set.
+    Uses the configured provider and preserves the browser fallback when none is set.
     """
-    if not groq_client:
-        return jsonify({"error": "No GROQ_API_KEY configured. Use browser Web Speech API."}), 400
+    if STT_PROVIDER == "browser":
+        return jsonify({"error": "Server-side STT is disabled. Use browser speech recognition."}), 400
 
     audio_file = request.files.get("audio")
     if not audio_file:
@@ -1192,11 +1267,21 @@ def api_stt():
     log.info("STT request: %d bytes, lang=%s", len(audio_bytes), lang)
 
     try:
-        transcript = groq_client.audio.transcriptions.create(
-            model="whisper-large-v3",
-            file=("audio.webm", audio_bytes, "audio/webm"),
-            language=lang,
-            response_format="text",
+        client = openai_stt_client if STT_PROVIDER == "openai" else groq_client
+        transcription_args = {
+            "model": STT_MODEL,
+            "file": (audio_file.filename or "audio.webm", audio_bytes, audio_file.mimetype or "audio/webm"),
+            "language": lang,
+        }
+        # OpenAI's GPT-4o transcription models return JSON; Groq Whisper can
+        # return text directly. Accept both shapes below.
+        if STT_PROVIDER == "groq":
+            transcription_args["response_format"] = "text"
+        transcript_response = client.audio.transcriptions.create(**transcription_args)
+        transcript = (
+            transcript_response
+            if isinstance(transcript_response, str)
+            else getattr(transcript_response, "text", "")
         )
         return jsonify({"text": transcript})
     except Exception as exc:
@@ -1208,8 +1293,10 @@ def api_stt():
 def api_config():
     """Return frontend-safe configuration (no secrets)."""
     return jsonify({
-        "stt_mode": "groq" if groq_client else "browser",
-        "groq_model": "whisper-large-v3" if groq_client else None,
+        "stt_mode": "server" if STT_PROVIDER != "browser" else "browser",
+        "stt_provider": STT_PROVIDER,
+        "stt_model": STT_MODEL if STT_PROVIDER != "browser" else None,
+        "ai_provider": AI_PROVIDER,
     })
 
 

@@ -96,6 +96,7 @@ _domain                        = _app._domain
 _verdict_counts                = _app._verdict_counts
 _build_pdf                     = _app._build_pdf
 structured_verdict_nemotron    = _app.structured_verdict_nemotron
+filter_verifiable_claims       = _app.filter_verifiable_claims
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -210,6 +211,17 @@ class TestNormaliseVerdict(unittest.TestCase):
         self.assertIsNone(_normalise_verdict(""))
 
 
+class TestVerifiableClaimFilter(unittest.TestCase):
+    def test_removes_common_conversational_sentences(self):
+        claims = [
+            {"id": "thanks", "text": "Thank you very much."},
+            {"id": "food", "text": "I want to eat some food."},
+            {"id": "fact", "text": "Paris is the capital of France."},
+        ]
+        filtered = filter_verifiable_claims(claims)
+        self.assertEqual(filtered, [{"id": "fact", "text": "Paris is the capital of France."}])
+
+
 class TestParseXmlToolContent(unittest.TestCase):
     def test_full_xml_parsed(self):
         result = _parse_xml_tool_content(XML_TRUNCATED_CONTENT)
@@ -288,10 +300,10 @@ class TestSourcesFromResearch(unittest.TestCase):
 
 
 class TestStructuredVerdictNemotron(unittest.TestCase):
-    """Integration tests using mocked Nebius client."""
+    """Integration tests using a mocked structured-output client."""
 
     def _patch_client(self, choice):
-        return patch.object(_app, "nebius_client", create=True,
+        return patch.object(_app, "llm_client", create=True,
                             **{"chat.completions.create.return_value": _mock_response(choice)})
 
     def test_path1_normal_tool_call(self):

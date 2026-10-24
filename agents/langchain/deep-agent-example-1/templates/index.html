@@ -9,27 +9,27 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:        #0f1117;
-  --surface:   #181c24;
-  --surface2:  #1e2330;
-  --border:    #2a2f3d;
-  --border2:   #353c50;
-  --text:      #dde3ef;
-  --text2:     #a8b0c4;
-  --muted:     #636b82;
-  --accent:    #4d8ef0;
-  --green:     #3fb068;
-  --green-bg:  #162a1f;
-  --red:       #e8524a;
-  --red-bg:    #2a1619;
-  --yellow:    #d4a72c;
-  --yellow-bg: #2a2210;
-  --purple:    #9e7fe8;
-  --purple-bg: #1f1a35;
-  --orange:    #e07830;
-  --radius:    8px;
+  --bg:        #f5f7fb;
+  --surface:   #ffffff;
+  --surface2:  #f0f3f8;
+  --border:    #dce3ed;
+  --border2:   #c9d3e1;
+  --text:      #182230;
+  --text2:     #4d5d70;
+  --muted:     #718096;
+  --accent:    #246bce;
+  --green:     #157347;
+  --green-bg:  #e8f7ee;
+  --red:       #bc2f2f;
+  --red-bg:    #feeeee;
+  --yellow:    #916b00;
+  --yellow-bg: #fff7d8;
+  --purple:    #6d4aae;
+  --purple-bg: #f1ebff;
+  --orange:    #a74d13;
+  --radius:    10px;
   --panel-h:   148px;
-  --header-h:  48px;
+  --header-h:  116px;
 }
 
 html, body { height: 100%; overflow: hidden; }
@@ -48,39 +48,50 @@ body {
   height: var(--header-h);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 10px;
-  padding: 0 16px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-rows: 42px 62px;
+  align-items: center;
+  column-gap: 10px;
+  padding: 6px 22px;
+  box-shadow: 0 1px 6px rgba(24, 34, 48, .05);
   overflow: hidden;
 }
-#header h1 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; flex-shrink: 0; }
+#header > svg { grid-column: 1; grid-row: 1; }
+#header h1 { grid-column: 2; grid-row: 1; font-size: 16px; font-weight: 700; letter-spacing: -.02em; }
 
 /* ── Verdict summary pills (feature 1) ─────────────────────────────────────── */
 #verdict-summary {
-  display: flex; align-items: center; gap: 5px;
-  margin-left: 8px; flex: 1; min-width: 0;
+  grid-column: 1 / -1; grid-row: 2;
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; min-width: 0;
   overflow-x: auto;
 }
 .vs-pill {
-  display: inline-flex; align-items: center; gap: 4px;
-  height: 22px; padding: 0 8px;
-  border-radius: 11px; font-size: 11px; font-weight: 600;
-  letter-spacing: 0; cursor: default; flex-shrink: 0;
-  transition: opacity .2s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  flex: 1 1 0; min-width: 130px;
+  height: 48px; padding: 0 14px;
+  border-radius: 10px; font-size: 12px; font-weight: 750;
+  letter-spacing: .015em; cursor: default;
+  box-shadow: 0 1px 2px rgba(24, 34, 48, .05);
+  transition: opacity .2s, transform .2s;
 }
-.vs-n { font-variant-numeric: tabular-nums; font-weight: 700; }
-.vs-pill[data-count="0"] { opacity: .3; }
-.vs-pill.SUPPORTED            { background: var(--green-bg);  color: var(--green);  border: 1px solid #1d4d30; }
-.vs-pill.CONTRADICTED         { background: var(--red-bg);    color: var(--red);    border: 1px solid #4d1e1a; }
-.vs-pill.MISLEADING           { background: var(--yellow-bg); color: var(--yellow); border: 1px solid #4d3d10; }
-.vs-pill.INSUFFICIENT_EVIDENCE { background: var(--surface2); color: var(--muted);  border: 1px solid var(--border); }
-.vs-pill.PENDING              { background: var(--surface2);  color: var(--accent); border: 1px solid #1b2e4d; }
-.vs-pill.FAILED                { background: #2a1500; color: var(--orange); border: 1px solid #4d2c00; }
+.vs-n { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 800; }
+.vs-pill[data-count="0"] { opacity: .5; }
+.vs-pill[data-count]:not([data-count="0"]) { transform: translateY(-1px); }
+.vs-pill.SUPPORTED            { background: var(--green-bg);  color: var(--green);  border: 1px solid #b8e3c8; }
+.vs-pill.CONTRADICTED         { background: var(--red-bg);    color: var(--red);    border: 1px solid #f3bbbb; }
+.vs-pill.MISLEADING           { background: var(--yellow-bg); color: var(--yellow); border: 1px solid #efdb8c; }
+.vs-pill.INSUFFICIENT_EVIDENCE { background: #edf1f6; color: #536477; border: 1px solid #d2dbe6; }
+.vs-pill.PENDING              { background: #e8f1ff; color: var(--accent); border: 1px solid #bdd5f8; }
+.vs-pill.FAILED                { background: #fff0e6; color: var(--orange); border: 1px solid #f2c6a5; }
 
 #header-right {
-  margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  grid-column: 3; grid-row: 1;
+  display: flex; align-items: center; gap: 8px;
 }
 #header-sub {
-  font-size: 11px; color: var(--muted);
+  font-size: 11px; color: var(--text2); font-weight: 600;
   white-space: nowrap;
 }
 
@@ -197,10 +208,10 @@ body {
 .badge.MISLEADING           { background: var(--yellow-bg); color: var(--yellow); }
 .badge.INSUFFICIENT_EVIDENCE { background: var(--surface2); color: var(--muted);  }
 .badge.queued               { background: var(--surface2); color: var(--muted);  }
-.badge.researching          { background: #0e1f3a; color: var(--accent);  }
+.badge.researching          { background: #e8f1ff; color: var(--accent);  }
 .badge.analyzing            { background: var(--purple-bg); color: var(--purple); }
 .badge.superseded           { background: var(--purple-bg); color: var(--purple); }
-.badge.error                { background: #2a1500; color: var(--orange);  }
+.badge.error                { background: #fff0e6; color: var(--orange);  }
 
 .spinner {
   display: inline-block; width: 9px; height: 9px;
@@ -342,7 +353,10 @@ button:disabled { opacity: .4; cursor: default; }
 @media (max-width: 680px) {
   .s-card { grid-template-columns: 1fr; }
   .s-left { border-right: none; border-bottom: 1px solid var(--border); }
-  :root { --panel-h: 168px; }
+  :root { --panel-h: 168px; --header-h: 110px; }
+  #header { padding: 4px 12px; grid-template-rows: 38px 60px; }
+  .vs-pill { min-width: 122px; height: 46px; }
+  .vs-n { font-size: 18px; }
 }
 </style>
 </head>
@@ -375,7 +389,7 @@ button:disabled { opacity: .4; cursor: default; }
       </svg>
       Download report
     </button>
-    <span id="header-sub">Nemotron · MiniMax-M3 · Tavily</span>
+    <span id="header-sub" aria-live="polite">No checks this session</span>
   </div>
 </div>
 
@@ -422,7 +436,7 @@ button:disabled { opacity: .4; cursor: default; }
    State
    ═══════════════════════════════════════════════════════════════════════════ */
 const S = {
-  cfg: { stt_mode: 'browser', groq_model: null },
+  cfg: { stt_mode: 'browser', stt_provider: null, stt_model: null },
   recording: false,
   transcript: '',
   interim: '',
@@ -453,6 +467,7 @@ const $btnReport    = document.getElementById('btn-report');
 const $langSelect   = document.getElementById('lang-select');
 const $sttStatus    = document.getElementById('stt-status');
 const $toast        = document.getElementById('toast');
+const $headerSub     = document.getElementById('header-sub');
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Utilities
@@ -525,6 +540,12 @@ function updateVerdictSummary() {
     pill.dataset.count = n;
     pill.querySelector('.vs-n').textContent = n;
   });
+
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const complete = total - counts.PENDING - counts.FAILED;
+  $headerSub.textContent = total === 0
+    ? 'No checks this session'
+    : `${total} ${total === 1 ? 'check' : 'checks'} · ${complete} complete`;
 
   // Pending and failed checks are part of the report, so any claim enables it.
   $btnReport.disabled = Object.keys(S.claims).length === 0;
@@ -713,7 +734,11 @@ function submitSentence(sentenceId, sentenceText) {
     const queued    = data.queued || [];
 
     if (extracted.length === 0) {
-      renderNoClaimCard(sentenceId, sentenceText);
+      // Conversational speech, static, and non-verifiable sentences are
+      // intentionally invisible in the claim area. The transcript retains
+      // what was heard, but it must not look like a failed fact-check.
+      delete S.sentenceMap[sentenceId];
+      S.sentences = S.sentences.filter(s => s.id !== sentenceId);
       return;
     }
 
@@ -829,13 +854,19 @@ function initWebSpeech() {
     setStatusText('Listening…');
   };
   recognition.onend = () => {
+    // Browsers may stop with the final words still marked as "interim". Keep
+    // them instead of silently dropping the last clause of a spoken sentence.
+    const finalInterim = S.interim.trim();
+    if (finalInterim) {
+      S.transcript += (S.transcript && !/\s$/.test(S.transcript) ? ' ' : '') + finalInterim;
+    }
     S.recording = false;
     $btnMic.classList.remove('recording');
     $btnMicLabel.textContent = 'Start';
     setStatusText('Stopped');
     S.interim = '';
-    renderTranscript();
     maybeSplitAndSubmit(S.transcript, true);
+    renderTranscript();
   };
   recognition.onerror = e => {
     showError('Speech recognition error: ' + e.error);
@@ -881,7 +912,7 @@ function maybeSplitAndSubmit(text, flush) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   STT — Groq Whisper (full-stream accumulation)
+   STT — server transcription (full-stream accumulation)
    ═══════════════════════════════════════════════════════════════════════════
 
    Full-stream strategy: every MediaRecorder chunk is pushed onto allChunks[].
@@ -895,10 +926,12 @@ function maybeSplitAndSubmit(text, flush) {
 
 const CHUNK_MS = 4000;
 
-async function startGroqRecording() {
+async function startServerRecording() {
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
   } catch (err) {
     showError('Microphone access denied: ' + err.message);
     return;
@@ -930,7 +963,7 @@ async function startGroqRecording() {
         const resp = await fetch('/api/stt', { method: 'POST', body: fd });
         const data = await resp.json();
         if (S.groqSessionId !== sessionId) return;
-        if (data.error) { showError('Groq STT: ' + data.error); return; }
+        if (data.error) { showError('STT: ' + data.error); return; }
         const text = (data.text || '').trim();
         if (!text) return;
         S.transcript = text;
@@ -950,7 +983,7 @@ async function startGroqRecording() {
       S.recording = false;
       $btnMic.classList.remove('recording');
       $btnMicLabel.textContent = 'Start';
-      setStatusText('Groq Whisper · ready');
+      setStatusText((S.cfg.stt_provider || 'Server') + ' · ready');
     });
   };
 
@@ -961,7 +994,7 @@ async function startGroqRecording() {
   setStatusText('Recording · chunk every ' + (CHUNK_MS / 1000) + 's…');
 }
 
-function stopGroqRecording() {
+function stopServerRecording() {
   if (S.groqRecorder && S.groqRecorder.state !== 'inactive') S.groqRecorder.stop();
   setStatusText('Finishing…');
 }
@@ -970,9 +1003,9 @@ function stopGroqRecording() {
    Mic button
    ═══════════════════════════════════════════════════════════════════════════ */
 $btnMic.addEventListener('click', () => {
-  if (S.cfg.stt_mode === 'groq') {
-    if (S.recording) stopGroqRecording();
-    else startGroqRecording();
+  if (S.cfg.stt_mode === 'server') {
+    if (S.recording) stopServerRecording();
+    else startServerRecording();
     return;
   }
   if (S.recording) {
@@ -981,7 +1014,7 @@ $btnMic.addEventListener('click', () => {
   }
   if (!recognition) {
     if (!initWebSpeech()) {
-      showError('Web Speech API not available. Add GROQ_API_KEY for server-side STT.');
+      showError('Web Speech API not available. Configure OpenAI or Groq server-side STT.');
       return;
     }
   }
@@ -1032,7 +1065,7 @@ $btnReset.addEventListener('click', async () => {
   S.groqSessionId++;
 
   if (S.groqRecorder && S.groqRecorder.state !== 'inactive') S.groqRecorder.stop();
-  if (recognition && S.recording && S.cfg.stt_mode !== 'groq') recognition.stop();
+  if (recognition && S.recording && S.cfg.stt_mode !== 'server') recognition.stop();
   S.recording = false;
   $btnMic.classList.remove('recording');
   $btnMicLabel.textContent = 'Start';
@@ -1072,13 +1105,13 @@ function setStatusText(text) { $sttStatus.textContent = text; }
     S.cfg = await r.json();
   } catch {}
 
-  if (S.cfg.stt_mode === 'groq') {
-    setStatusText('Groq Whisper · ready');
+  if (S.cfg.stt_mode === 'server') {
+    setStatusText((S.cfg.stt_provider || 'Server') + ' · ' + (S.cfg.stt_model || 'ready'));
   } else {
     if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
       setStatusText('Web Speech unavailable');
       $btnMic.disabled = true;
-      showError('Web Speech API requires Chrome or Edge. Set GROQ_API_KEY for server-side STT.');
+      showError('Web Speech API requires Chrome or Edge. Configure OpenAI or Groq server-side STT.');
     } else {
       setStatusText('Web Speech · ready');
     }
