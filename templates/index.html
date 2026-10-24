@@ -78,7 +78,7 @@ body {
 }
 .vs-n { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 800; }
 .vs-pill[data-count="0"] { opacity: .5; }
-.vs-pill[data-count]:not([data-count="0"]) { transform: translateY(-1px); }
+.vs-pill[data-count]:not([data-count="0"]) { box-shadow: 0 2px 5px rgba(24, 34, 48, .12); }
 .vs-pill.SUPPORTED            { background: var(--green-bg);  color: var(--green);  border: 1px solid #b8e3c8; }
 .vs-pill.CONTRADICTED         { background: var(--red-bg);    color: var(--red);    border: 1px solid #f3bbbb; }
 .vs-pill.MISLEADING           { background: var(--yellow-bg); color: var(--yellow); border: 1px solid #efdb8c; }
