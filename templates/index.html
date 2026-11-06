@@ -308,11 +308,14 @@ button:disabled { opacity: .4; cursor: default; }
   background: var(--surface2); color: var(--text2);
   border: 1px solid var(--border);
 }
-#lang-select {
+#lang-select, #audio-input {
   background: var(--surface2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 9px; font-size: 12px;
 }
+#audio-input { max-width: min(200px, 100%); }
+#speaker-capture-option { color: var(--text2); font-size: 12px; white-space: nowrap; }
+#speaker-capture { vertical-align: middle; }
 #stt-status {
   font-size: 11px; color: var(--muted);
   margin-left: 2px;
@@ -461,6 +464,14 @@ button:disabled { opacity: .4; cursor: default; }
       <option value="fr">Français</option>
       <option value="es">Español</option>
     </select>
+    <select id="audio-input" aria-label="Audio input" hidden>
+      <option value="">Default audio input</option>
+      <option value="request-access">Show available inputs…</option>
+    </select>
+    <label id="speaker-capture-option" hidden>
+      <input id="speaker-capture" type="checkbox">
+      Capture speaker playback
+    </label>
     <span id="stt-status">—</span>
   </div>
   <div id="transcript-area">
@@ -536,6 +547,8 @@ const $btnReset     = document.getElementById('btn-reset-sess');
 const $btnContext   = document.getElementById('btn-context');
 const $btnReport    = document.getElementById('btn-report');
 const $langSelect   = document.getElementById('lang-select');
+const $audioInput   = document.getElementById('audio-input');
+const $speakerCapture = document.getElementById('speaker-capture');
 const $sttStatus    = document.getElementById('stt-status');
 const $toast        = document.getElementById('toast');
 const $headerSub     = document.getElementById('header-sub');
@@ -1047,26 +1060,88 @@ function maybeSplitAndSubmit(text, flush) {
 
 const CHUNK_MS = 4000;
 
-async function startServerRecording() {
-  let stream;
+async function refreshAudioInputs() {
+  let devices;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
-  } catch (err) {
-    showError('Microphone access denied: ' + err.message);
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch {
     return;
   }
 
-  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus'
-    : 'audio/webm';
+  const selected = $audioInput.value;
+  const inputs = devices.filter(device =>
+    device.kind === 'audioinput' && device.deviceId && device.deviceId !== 'default'
+  );
+  $audioInput.replaceChildren(new Option('Default audio input', ''));
+  inputs.forEach((device, index) => {
+    $audioInput.add(new Option(device.label || 'Audio input ' + (index + 1), device.deviceId));
+  });
+  if (!inputs.some(device => device.label)) {
+    $audioInput.add(new Option('Show available inputs…', 'request-access'));
+  }
+  $audioInput.value = inputs.some(device => device.deviceId === selected) ? selected : '';
+}
+
+$audioInput.addEventListener('change', async () => {
+  if ($audioInput.value !== 'request-access') return;
+  $audioInput.value = '';
+  $audioInput.disabled = true;
+  $btnMic.disabled = true;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    await refreshAudioInputs();
+  } catch (err) {
+    showError('Could not list audio inputs: ' + err.message);
+  } finally {
+    stream?.getTracks().forEach(track => track.stop());
+    $audioInput.disabled = false;
+    $btnMic.disabled = false;
+  }
+});
+
+async function startServerRecording() {
+  const previousSessionId = S.groqSessionId;
+  const deviceId = $audioInput.value;
+  const processAudio = !$speakerCapture.checked;
+  const audio = {
+    echoCancellation: processAudio,
+    noiseSuppression: processAudio,
+    autoGainControl: processAudio,
+  };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio });
+  } catch (err) {
+    showError('Could not open audio input: ' + err.message);
+    return;
+  }
+  if (S.groqSessionId !== previousSessionId) {
+    stream.getTracks().forEach(track => track.stop());
+    return;
+  }
+  refreshAudioInputs();
+
+  let recorder;
+  let mimeType;
+  try {
+    mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm';
+    recorder = new MediaRecorder(stream, { mimeType });
+    recorder.start(CHUNK_MS);
+  } catch (err) {
+    stream.getTracks().forEach(track => track.stop());
+    showError('Could not start recording: ' + err.message);
+    return;
+  }
 
   const sessionId = ++S.groqSessionId;
   let groqChain   = Promise.resolve();
   const allChunks = [];
 
-  const recorder = new MediaRecorder(stream, { mimeType });
   S.groqRecorder = recorder;
 
   recorder.ondataavailable = e => {
@@ -1102,13 +1177,14 @@ async function startServerRecording() {
       if (S.groqSessionId !== sessionId) return;
       if (S.transcript.trim()) maybeSplitAndSubmit(S.transcript, true);
       S.recording = false;
+      $audioInput.disabled = false;
+      $speakerCapture.disabled = false;
       $btnMic.classList.remove('recording');
       $btnMicLabel.textContent = 'Start';
       setStatusText((S.cfg.stt_provider || 'Server') + ' · ready');
     });
   };
 
-  recorder.start(CHUNK_MS);
   S.recording = true;
   $btnMic.classList.add('recording');
   $btnMicLabel.textContent = 'Stop';
@@ -1123,10 +1199,22 @@ function stopServerRecording() {
 /* ═══════════════════════════════════════════════════════════════════════════
    Mic button
    ═══════════════════════════════════════════════════════════════════════════ */
-$btnMic.addEventListener('click', () => {
+$btnMic.addEventListener('click', async () => {
   if (S.cfg.stt_mode === 'server') {
-    if (S.recording) stopServerRecording();
-    else startServerRecording();
+    if (S.recording) {
+      stopServerRecording();
+    } else {
+      $btnMic.disabled = true;
+      $audioInput.disabled = true;
+      $speakerCapture.disabled = true;
+      try {
+        await startServerRecording();
+      } finally {
+        $btnMic.disabled = false;
+        $audioInput.disabled = S.recording;
+        $speakerCapture.disabled = S.recording;
+      }
+    }
     return;
   }
   if (S.recording) {
@@ -1205,6 +1293,8 @@ $btnReset.addEventListener('click', async () => {
   if (S.groqRecorder && S.groqRecorder.state !== 'inactive') S.groqRecorder.stop();
   if (recognition && S.recording && S.cfg.stt_mode !== 'server') recognition.stop();
   S.recording = false;
+  $audioInput.disabled = $btnMic.disabled;
+  $speakerCapture.disabled = $btnMic.disabled;
   $btnMic.classList.remove('recording');
   $btnMicLabel.textContent = 'Start';
 
@@ -1247,6 +1337,12 @@ function setStatusText(text) { $sttStatus.textContent = text; }
 
   if (S.cfg.stt_mode === 'server') {
     setStatusText((S.cfg.stt_provider || 'Server') + ' · ' + (S.cfg.stt_model || 'ready'));
+    if (navigator.mediaDevices) {
+      $audioInput.hidden = false;
+      document.getElementById('speaker-capture-option').hidden = false;
+      refreshAudioInputs();
+      navigator.mediaDevices.addEventListener('devicechange', refreshAudioInputs);
+    }
   } else {
     if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
       setStatusText('Web Speech unavailable');

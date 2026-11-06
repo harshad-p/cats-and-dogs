@@ -72,6 +72,22 @@ uv run python app.py
 
 Open http://localhost:5050, click **Start**, and speak a factual claim. Use **Reset** to clear the session.
 
+With OpenAI or Groq transcription, use **Audio input** to select a microphone
+or virtual audio device before recording. If the list is empty, choose **Show
+available inputs…** and grant microphone access. Browser speech mode uses the
+browser's default audio input.
+
+To record a video playing through your speakers, select your microphone and
+enable **Capture speaker playback** before clicking **Start**. This asks the
+browser to turn off echo cancellation, noise suppression, and automatic gain
+control for that recording.
+
+On macOS, install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole#installation-instructions)
+on the Mac running the browser. To capture audio while still hearing it, route
+playback through a [Multi-Output Device](https://github.com/ExistentialAudio/BlackHole/wiki/Use-BlackHole-as-a-Virtual-Microphone)
+that includes BlackHole and your speakers or headphones. Then select **BlackHole
+2ch** in **Audio input**.
+
 Use **Check context** before speaking when the interpretation depends on time,
 place, or speaker. An explicit date in the claim takes priority; otherwise the
 selected “evaluate as of” date is used for time-sensitive claims. Context helps
